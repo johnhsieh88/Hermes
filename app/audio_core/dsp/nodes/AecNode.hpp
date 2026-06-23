@@ -21,7 +21,8 @@ public:
         const bool  active = (in.mode == EngineMode::CloudStreaming ||
                               in.mode == EngineMode::BargeInMuting);
         const float target = active ? 1.0f : 0.0f;
-        const float rate   = 1.0f / 480.0f;   // ~10 ms ramp @ 48 kHz
+        const int   sr     = cfg_ ? cfg_->sampleRate : 48000;
+        const float rate   = 1.0f / (0.010f * static_cast<float>(sr));   // ~10 ms ramp
 
         out.channelCount = in.channelCount;
         out.sampleCount  = in.sampleCount;

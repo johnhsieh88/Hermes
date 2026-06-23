@@ -1,43 +1,68 @@
 #include "audio_core/pipewire/PwStage.hpp"
 #include "audio_core/dsp/ModeControl.hpp"
-#include "audio_core/dsp/nodes/AecNode.hpp"
-#include "audio_core/dsp/nodes/BeamformNode.hpp"
-#include "audio_core/dsp/nodes/SesNode.hpp"
-#include "audio_core/dsp/nodes/SrcNode.hpp"
+#include "audio_core/dsp/NodeFactory.hpp"
+#include "hermes/common/Catalog.hpp"
+#include "hermes/common/EventMap.hpp"
+#include "hermes/common/ModuleId.hpp"
+#include "hermes/common/MsgBus.hpp"
 #include <memory>
 #include <vector>
 
-// Single ABOX binary hosting the MULTI-NODE DSP graph: ONE PipeWire client/loop,
-// multiple pw_filter nodes (each still a separate, individually-routable graph node
-// — hermes.src / hermes.aec / hermes.beamform / hermes.ses). Links between them are
-// made by the init process / WirePlumber, exactly as with the per-stage binaries.
-//
-// One process, one PipeWire connection, one RT data-loop driving all stages.
+// hermes_abox — the AUDIO_CORE process (ModuleId 2): the MULTI-NODE DSP graph
+// (src/aec/beamform/ses, each its own pw_filter) PLUS the control module, in ONE
+// binary, on ONE PipeWire client/loop. PipeWire links + schedules the nodes
+// (init process / WirePlumber); the nodes adapt by engine mode on a static graph
+// (approach B) — no re-routing.
+namespace hermes {
+
+// Control: drives the shared ModeControl from SET_MODE (approach B). The MsgBus
+// recv thread runs this; nodes read the mode per block via PwStage (lock-free).
+class AudioCore : public MsgBus, public EventMap<AudioCore> {
+public:
+    explicit AudioCore(dsp::ModeControl& mode) : mode_(mode) {
+        Add(_AudioCore::cmd::SET_MODE,       &AudioCore::onSetMode);
+        Add(_AudioCore::cmd::RESET_PIPELINE, &AudioCore::onReset);
+        // TODO: START_CAPTURE / DUCK_PLAYBACK / FREEZE_ADAPT / ARM_BARGE_IN → finer controls.
+    }
+    int ProcessMsg(CMsg* m) override { return Execute(m->hdr.id, m); }
+
+private:
+    void onSetMode(const CMsg* m) {
+        if (m->pBody && m->hdr.length >= sizeof(int)) {
+            auto em = static_cast<dsp::EngineMode>(*static_cast<const int*>(m->pBody));
+            mode_.setMode(em, /*atSamplePos=*/0);   // next block; coherent via samplePos
+        }
+    }
+    void onReset(const CMsg*) {}                     // TODO: §6.2 reset pipeline
+    dsp::ModeControl& mode_;
+};
+
+} // namespace hermes
+
 int main() {
     using namespace hermes;
 
     pw::PwClient client("hermes.abox");
     if (client.connect() != 0) return 1;
 
-    // One shared engine-mode for all stages (approach B). The AudioCore MsgBus
-    // handler drives it: onSetMode → mode.setMode(newMode, futureSamplePos). Nodes
-    // adapt (e.g. AEC active vs bypass) on a static graph — no re-routing.
-    static dsp::ModeControl mode;   // static: outlives the RT data-loop
+    static dsp::ModeControl mode;            // shared engine mode (approach B)
+    AudioCore ctrl(mode);
+    ctrl.ConnectMsg(ModuleId::AUDIO_CORE);   // control plane → onSetMode drives `mode`
 
+    // Create each DSP stage as its own pw_filter node (multi-node graph, one process).
     std::vector<std::unique_ptr<pw::PwStage>> stages;
-    auto add = [&](const char* name, std::unique_ptr<dsp::Node> n, int ci, int co) {
-        auto s = std::make_unique<pw::PwStage>(client, name, std::move(n), ci, co, &mode);
+    auto add = [&](const char* pwName, const char* type, int ci, int co) {
+        auto s = std::make_unique<pw::PwStage>(client, pwName, dsp::makeNode(type), ci, co, &mode);
         s->attach(48000, 240);
         stages.push_back(std::move(s));
     };
+    add("hermes.src",      "src",      2, 2);
+    add("hermes.aec",      "aec",      2, 2);
+    add("hermes.beamform", "beamform", 2, 1);
+    add("hermes.ses",      "ses",      1, 1);
 
-    add("hermes.src",      std::make_unique<dsp::SrcNode>(),      2, 2);
-    add("hermes.aec",      std::make_unique<dsp::AecNode>(),      2, 2);
-    add("hermes.beamform", std::make_unique<dsp::BeamformNode>(), 2, 1);
-    add("hermes.ses",      std::make_unique<dsp::SesNode>(),      1, 1);
-
-    // TODO: run the AudioCore MsgBus module here too (shared process) so SET_MODE
-    //       drives `mode`; until then the graph stays in KeywordListening.
-    client.run();   // one loop drives every node; init process wires the links
+    // Links (mic→src→aec→beamform→ses→…) are created by the init process / WirePlumber.
+    // (Optional: a code-defined wireGraph() could call create_pw_link() here instead.)
+    client.run();   // PipeWire data-loop; MsgBus recv thread drives `mode` concurrently
     return 0;
 }

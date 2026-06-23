@@ -1,6 +1,5 @@
-# hermes_dsp — the §1–§13 DSP island as a pure C++ library (no PipeWire).
-# Linked into audio_core and into test/unit/dsp. Nodes are header-only; Chain.cpp
-# is the one TU.
-add_library(hermes_dsp STATIC Chain.cpp)
+# hermes_dsp — DSP nodes (SRC/AEC/Beamform/SES/ChannelMix, header-only) + factory.
+# Pure C++, no PipeWire. NodeFactory.cpp is the one TU (also compiles every node).
+add_library(hermes_dsp STATIC NodeFactory.cpp)
 target_include_directories(hermes_dsp PUBLIC ${CMAKE_SOURCE_DIR}/app)
 target_compile_features(hermes_dsp PUBLIC cxx_std_17)

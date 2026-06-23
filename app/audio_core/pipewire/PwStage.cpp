@@ -13,6 +13,7 @@ struct PwStage::Impl {
     int                           chIn  = 0;
     int                           chOut = 0;
     const dsp::ModeControl*       mode  = nullptr;   // shared engine-mode (approach B)
+    dsp::AboxConfig               cfg{};             // common config handed to the node
     std::unique_ptr<PwFilterNode> pwnode;
     dsp::AudioBuffer              in{};
     dsp::AudioBuffer              out{};
@@ -54,6 +55,10 @@ PwStage::PwStage(PwClient& client, const char* name, std::unique_ptr<dsp::Node> 
 PwStage::~PwStage() = default;
 
 int PwStage::attach(int sampleRate, int quantum) {
+    impl_->cfg.sampleRate = sampleRate;
+    impl_->cfg.blockSize  = quantum;
+    impl_->node->setChannels(impl_->chIn, impl_->chOut);
+    impl_->node->prepare(impl_->cfg);              // common args for the node
     impl_->pwnode = create_pw_node(impl_->client, impl_->name, impl_->chIn, impl_->chOut,
                                    &Impl::block, impl_.get(), sampleRate, quantum);
     return impl_->pwnode ? 0 : -1;

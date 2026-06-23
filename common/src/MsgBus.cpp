@@ -81,7 +81,7 @@ void MsgBus::RecvMsgTask(void* /*pArg*/) {
     while (mConnected.load(std::memory_order_relaxed)) {
         if (RecvMsg(&m) == 0) {
             ProcessMsg(&m);   // → EventMap::Execute(id, msg) in the module
-            FlushMsg(&m);
+            FlushMsg(&m);     // free the message body
         }
     }
 }
