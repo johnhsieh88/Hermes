@@ -50,18 +50,19 @@ struct PwFilterNode::Impl {
     std::vector<void*>        inPort, outPort;     // per-channel mono DSP ports
     std::vector<const float*> inBuf;
     std::vector<float*>       outBuf;
-};
 
-// RT data-loop, once per quantum: resolve port buffers, call the user BlockFn.
-static void node_on_process(void* data, spa_io_position* pos) {
-    auto* d = static_cast<PwFilterNode::Impl*>(data);
-    const uint32_t n = pos->clock.duration;
-    for (int c = 0; c < d->chIn; ++c)
-        d->inBuf[c] = static_cast<const float*>(pw_filter_get_dsp_buffer(d->inPort[c], n));
-    for (int c = 0; c < d->chOut; ++c)
-        d->outBuf[c] = static_cast<float*>(pw_filter_get_dsp_buffer(d->outPort[c], n));
-    d->fn(d->user, d->inBuf.data(), d->chIn, d->outBuf.data(), d->chOut, n, pos->clock.position);
-}
+    // RT data-loop, once per quantum (static member → may access private Impl;
+    // usable as the pw_filter_events.process C callback).
+    static void on_process(void* data, spa_io_position* pos) {
+        auto* d = static_cast<Impl*>(data);
+        const uint32_t n = pos->clock.duration;
+        for (int c = 0; c < d->chIn; ++c)
+            d->inBuf[c] = static_cast<const float*>(pw_filter_get_dsp_buffer(d->inPort[c], n));
+        for (int c = 0; c < d->chOut; ++c)
+            d->outBuf[c] = static_cast<float*>(pw_filter_get_dsp_buffer(d->outPort[c], n));
+        d->fn(d->user, d->inBuf.data(), d->chIn, d->outBuf.data(), d->chOut, n, pos->clock.position);
+    }
+};
 
 PwFilterNode::PwFilterNode(PwClient& client, const char* name, int chIn, int chOut, BlockFn fn, void* user)
     : impl_(std::make_unique<Impl>()) {
@@ -76,7 +77,7 @@ PwFilterNode::PwFilterNode(PwClient& client, const char* name, int chIn, int chO
                           PW_KEY_NODE_NAME, name, nullptr));
 
     impl_->events.version = PW_VERSION_FILTER_EVENTS;
-    impl_->events.process = node_on_process;
+    impl_->events.process = &Impl::on_process;
     pw_filter_add_listener(impl_->filter, &impl_->listener, &impl_->events, impl_.get());
 }
 

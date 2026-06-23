@@ -2,43 +2,33 @@ name: ci
 on: [push, pull_request]
 
 jobs:
-  # Native x86_64 build WITH PipeWire — verifies the PipeWire targets (Pw.cpp,
-  # PwNode.cpp, hermes_pw_*) actually compile against libpipewire-0.3.
-  linux-x86_64:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake g++ pkg-config libpipewire-0.3-dev libgtest-dev
-      - name: Configure
-        run: cmake -S . -B build
-      - name: Build (incl. PipeWire targets)
-        run: cmake --build build -j
-      - name: Test
-        run: ctest --test-dir build --output-on-failure
-
-  # arm64 cross-compile — the embedded target arch (SDS §9.5). Uses the multiarch
-  # libpipewire-0.3-dev:arm64 as the sysroot at "/".
-  linux-arm64-cross:
+  # arm64 cross-compile for the RK3588 target (aarch64, Cortex-A76+A55). This is the
+  # ONLY supported target arch — it compiles the whole tree, including the PipeWire
+  # targets (Pw.cpp, PwNode.cpp, hermes_pw_*), so code errors are caught here too.
+  arm64-cross:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Set up arm64 multiarch + cross toolchain
         run: |
           sudo dpkg --add-architecture arm64
-          sudo sed -i 's/^deb http/deb [arch=amd64] http/' /etc/apt/sources.list || true
-          sudo tee /etc/apt/sources.list.d/arm64.list >/dev/null <<EOF
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports $(lsb_release -cs) main universe
-          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports $(lsb_release -cs)-updates main universe
+          # Ubuntu 24.04 runners use deb822 /etc/apt/sources.list.d/ubuntu.sources.
+          # Pin the default archive to amd64 (no arm64 there), add ports for arm64.
+          sudo sed -i 's/^Types: deb/Types: deb\nArchitectures: amd64/' /etc/apt/sources.list.d/ubuntu.sources
+          sudo tee /etc/apt/sources.list.d/ports-arm64.sources >/dev/null <<EOF
+          Types: deb
+          URIs: http://ports.ubuntu.com/ubuntu-ports
+          Suites: noble noble-updates noble-backports
+          Components: main universe
+          Architectures: arm64
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
           EOF
           sudo apt-get update
           sudo apt-get install -y cmake pkg-config g++-aarch64-linux-gnu libpipewire-0.3-dev:arm64
-      - name: Cross configure
+      - name: Cross configure (RK3588 / aarch64)
         run: |
           cmake -S . -B build-arm64 \
-            -DCMAKE_TOOLCHAIN_FILE=cmake/aarch64-linux-gnu.toolchain.cmake \
-            -DCMAKE_SYSROOT=/ -DHERMES_BUILD_TESTS=OFF
-      - name: Cross build
+            -DCMAKE_TOOLCHAIN_FILE=cmake/rk3588.toolchain.cmake \
+            -DHERMES_BUILD_TESTS=OFF
+      - name: Cross build (incl. PipeWire targets)
         run: cmake --build build-arm64 -j

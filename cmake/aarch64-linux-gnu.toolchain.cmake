@@ -22,16 +22,22 @@ set(CROSS_PREFIX "aarch64-linux-gnu-" CACHE STRING "cross toolchain prefix")
 set(CMAKE_C_COMPILER   "${CROSS_PREFIX}gcc")
 set(CMAKE_CXX_COMPILER "${CROSS_PREFIX}g++")
 
-# Resolve programs on the host, libs/headers/packages in the target sysroot.
+# Always resolve programs on the host (the cross compiler).
 set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
-set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
-set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
-set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE BOTH)
 
-# pkg-config must find libpipewire-0.3 in the SYSROOT, not on the host.
 if(CMAKE_SYSROOT)
+  # Dedicated arm64 sysroot (Yocto SDK / debootstrap rootfs): search only there.
+  set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+  set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
   set(ENV{PKG_CONFIG_SYSROOT_DIR} "${CMAKE_SYSROOT}")
   set(ENV{PKG_CONFIG_LIBDIR}
       "${CMAKE_SYSROOT}/usr/lib/aarch64-linux-gnu/pkgconfig:${CMAKE_SYSROOT}/usr/lib/pkgconfig:${CMAKE_SYSROOT}/usr/share/pkgconfig")
   unset(ENV{PKG_CONFIG_PATH})
+else()
+  # Multiarch on the build host (e.g. CI with libpipewire-0.3-dev:arm64 installed).
+  set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY BOTH)
+  set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE BOTH)
+  set(ENV{PKG_CONFIG_LIBDIR} "/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig")
+  unset(ENV{PKG_CONFIG_SYSROOT_DIR})
 endif()
