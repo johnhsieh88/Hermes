@@ -28,6 +28,7 @@ public:
         const int n = in.sampleCount;
         out.sampleCount = n;
         out.samplePos   = in.samplePos;
+        out.mode        = in.mode;
         out.channelCount = haveMatrix_ ? mOut_ : outCh_;
 
         if (haveMatrix_) {                                   // explicit matrix mix

@@ -1,4 +1,5 @@
 #include "audio_core/pipewire/PwStage.hpp"
+#include "audio_core/dsp/ModeControl.hpp"
 #include "audio_core/dsp/nodes/AecNode.hpp"
 #include "audio_core/dsp/nodes/BeamformNode.hpp"
 #include "audio_core/dsp/nodes/SesNode.hpp"
@@ -18,9 +19,14 @@ int main() {
     pw::PwClient client("hermes.abox");
     if (client.connect() != 0) return 1;
 
+    // One shared engine-mode for all stages (approach B). The AudioCore MsgBus
+    // handler drives it: onSetMode → mode.setMode(newMode, futureSamplePos). Nodes
+    // adapt (e.g. AEC active vs bypass) on a static graph — no re-routing.
+    static dsp::ModeControl mode;   // static: outlives the RT data-loop
+
     std::vector<std::unique_ptr<pw::PwStage>> stages;
     auto add = [&](const char* name, std::unique_ptr<dsp::Node> n, int ci, int co) {
-        auto s = std::make_unique<pw::PwStage>(client, name, std::move(n), ci, co);
+        auto s = std::make_unique<pw::PwStage>(client, name, std::move(n), ci, co, &mode);
         s->attach(48000, 240);
         stages.push_back(std::move(s));
     };
@@ -30,6 +36,8 @@ int main() {
     add("hermes.beamform", std::make_unique<dsp::BeamformNode>(), 2, 1);
     add("hermes.ses",      std::make_unique<dsp::SesNode>(),      1, 1);
 
+    // TODO: run the AudioCore MsgBus module here too (shared process) so SET_MODE
+    //       drives `mode`; until then the graph stays in KeywordListening.
     client.run();   // one loop drives every node; init process wires the links
     return 0;
 }

@@ -14,6 +14,7 @@ public:
         out.channelCount = 1;
         out.sampleCount  = in.sampleCount;
         out.samplePos    = in.samplePos;
+        out.mode         = in.mode;
         std::memcpy(out.chan[0], in.chan[0], sizeof(float) * static_cast<size_t>(in.sampleCount));
     }
 };

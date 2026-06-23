@@ -1,4 +1,5 @@
 #include "audio_core/pipewire/PwStage.hpp"
+#include "audio_core/dsp/ModeControl.hpp"
 #include <cstring>
 
 // PwStage binds a dsp::Node to a filter node on a SHARED PwClient (Pw.hpp wrapper).
@@ -11,6 +12,7 @@ struct PwStage::Impl {
     std::unique_ptr<dsp::Node>    node;
     int                           chIn  = 0;
     int                           chOut = 0;
+    const dsp::ModeControl*       mode  = nullptr;   // shared engine-mode (approach B)
     std::unique_ptr<PwFilterNode> pwnode;
     dsp::AudioBuffer              in{};
     dsp::AudioBuffer              out{};
@@ -24,6 +26,9 @@ struct PwStage::Impl {
         d->in.channelCount = chIn;
         d->in.sampleCount  = static_cast<int>(n);
         d->in.samplePos    = samplePos;
+        // Per-cycle coherent mode latch (approach B): every stage derives the same
+        // effective mode for this sample position, so a mid-stream change is skew-free.
+        d->in.mode = d->mode ? d->mode->modeAt(samplePos) : dsp::EngineMode::KeywordListening;
         for (int c = 0; c < chIn; ++c)
             if (in[c]) std::memcpy(d->in.chan[c], in[c], n * sizeof(float));
 
@@ -38,11 +43,12 @@ struct PwStage::Impl {
 };
 
 PwStage::PwStage(PwClient& client, const char* name, std::unique_ptr<dsp::Node> node,
-                 int channelsIn, int channelsOut)
+                 int channelsIn, int channelsOut, const dsp::ModeControl* mode)
     : impl_(std::make_unique<Impl>(client, name)) {
     impl_->node  = std::move(node);
     impl_->chIn  = channelsIn;
     impl_->chOut = channelsOut;
+    impl_->mode  = mode;
 }
 
 PwStage::~PwStage() = default;

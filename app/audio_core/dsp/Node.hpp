@@ -10,13 +10,24 @@ namespace hermes::dsp {
 static constexpr int MAX_CHANNELS = 2;     // 2-mic array
 static constexpr int MAX_BLOCK    = 512;   // FFT-framing headroom over the 240-sample block
 
+// Engine use-case mode (SDS §3). Approach B: nodes adapt behavior by mode on a
+// static graph (no re-routing). Carried per-block in AudioBuffer, latched
+// coherently from ModeControl (ModeControl.hpp).
+enum class EngineMode : int {
+    KeywordListening = 0,   // idle/wake — no playback, AEC bypassed
+    BargeInMuting    = 1,   // user interrupted — ducking; AEC active
+    CloudStreaming   = 2,   // conversation — full duplex, AEC active
+    SystemResetError = 3,
+};
+
 // Channel-major audio buffer flowing through the chain. Engine-owned storage
 // (the RT path treats these as pool buffers — zero-alloc).
 struct AudioBuffer {
-    float    chan[MAX_CHANNELS][MAX_BLOCK];
-    int      channelCount = 0;
-    int      sampleCount  = 0;
-    uint64_t samplePos    = 0;   // PipeWire timeline (spa_io_position.clock.position)
+    float      chan[MAX_CHANNELS][MAX_BLOCK];
+    int        channelCount = 0;
+    int        sampleCount  = 0;
+    uint64_t   samplePos    = 0;                       // PipeWire timeline (clock.position)
+    EngineMode mode         = EngineMode::KeywordListening;  // latched per cycle (approach B)
 };
 
 class Node {
@@ -34,6 +45,7 @@ protected:
         out.channelCount = in.channelCount;
         out.sampleCount  = in.sampleCount;
         out.samplePos    = in.samplePos;
+        out.mode         = in.mode;
         for (int c = 0; c < in.channelCount; ++c)
             std::memcpy(out.chan[c], in.chan[c], sizeof(float) * static_cast<size_t>(in.sampleCount));
     }
