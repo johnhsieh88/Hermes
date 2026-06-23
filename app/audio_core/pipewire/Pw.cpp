@@ -71,7 +71,9 @@ PwFilterNode::PwFilterNode(PwClient& client, const char* name, int chIn, int chO
 
     impl_->filter = pw_filter_new(client.core(), name,
         pw_properties_new(PW_KEY_MEDIA_TYPE, "Audio",
-                          PW_KEY_MEDIA_CATEGORY, "Filter", nullptr));
+                          PW_KEY_MEDIA_CATEGORY, "Filter",
+                          PW_KEY_MEDIA_ROLE, "DSP",     // idiomatic DSP filter node
+                          PW_KEY_NODE_NAME, name, nullptr));
 
     impl_->events.version = PW_VERSION_FILTER_EVENTS;
     impl_->events.process = node_on_process;
@@ -82,26 +84,32 @@ PwFilterNode::~PwFilterNode() {
     if (impl_->filter) pw_filter_destroy(impl_->filter);
 }
 
-static void* add_dsp_port(pw_filter* f, spa_direction dir, const char* portName, const char* latency) {
+static void* add_dsp_port(pw_filter* f, spa_direction dir, const char* portName) {
     return pw_filter_add_port(
         f, dir, PW_FILTER_PORT_FLAG_MAP_BUFFERS, sizeof(void*),
         pw_properties_new(PW_KEY_FORMAT_DSP, "32 bit float mono audio",
-                          PW_KEY_PORT_NAME, portName,
-                          PW_KEY_NODE_LATENCY, latency, nullptr),
+                          PW_KEY_PORT_NAME, portName, nullptr),
         nullptr, 0);
 }
 
 int PwFilterNode::connect(int sampleRate, int quantum) {
+    // NODE-level config: lock the 5 ms quantum on this node (§14.11). node.latency
+    // is a NODE property — set it on the filter, not on the ports.
     char latency[32];
-    std::snprintf(latency, sizeof latency, "%d/%d", quantum, sampleRate);   // lock 5 ms quantum (§14.11)
+    std::snprintf(latency, sizeof latency, "%d/%d", quantum, sampleRate);
+    pw_properties* np = pw_properties_new(PW_KEY_NODE_LATENCY, latency,
+                                          "node.lock-quantum", "true", nullptr);
+    pw_filter_update_properties(impl_->filter, nullptr, &np->dict);
+    pw_properties_free(np);
+
     char nm[16];
     for (int c = 0; c < impl_->chIn; ++c) {
         std::snprintf(nm, sizeof nm, "in_%d", c);
-        impl_->inPort.push_back(add_dsp_port(impl_->filter, PW_DIRECTION_INPUT, nm, latency));
+        impl_->inPort.push_back(add_dsp_port(impl_->filter, PW_DIRECTION_INPUT, nm));
     }
     for (int c = 0; c < impl_->chOut; ++c) {
         std::snprintf(nm, sizeof nm, "out_%d", c);
-        impl_->outPort.push_back(add_dsp_port(impl_->filter, PW_DIRECTION_OUTPUT, nm, latency));
+        impl_->outPort.push_back(add_dsp_port(impl_->filter, PW_DIRECTION_OUTPUT, nm));
     }
     return pw_filter_connect(impl_->filter, PW_FILTER_FLAG_RT_PROCESS, nullptr, 0);
 }
