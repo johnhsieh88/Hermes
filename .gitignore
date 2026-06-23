@@ -1,0 +1,13 @@
+build/
+out/
+*.o
+*.a
+compile_commands.json
+.cache/
+.DS_Store
+
+# Local-only internal design doc — kept out of the repo
+AudioBox_DSP_Framework_SDS.md
+
+# Claude Code session data
+.claude/
