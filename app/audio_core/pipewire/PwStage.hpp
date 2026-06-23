@@ -1,27 +1,24 @@
 #pragma once
 #include <memory>
 #include "audio_core/dsp/Node.hpp"
+#include "audio_core/pipewire/Pw.hpp"
 
-// Wraps ONE dsp::Node as a STANDALONE PipeWire filter node — a separate graph node,
-// individually visible/routable in PipeWire (pw-top, links, WirePlumber policy).
-// This is the MULTI-NODE variant of SDS §14.4: each DSP stage is its own PipeWire
-// node, vs. the single-node RT island (PwNode) that hosts the whole Chain. Each
-// audio channel is one mono PipeWire DSP port.
-//
-// Built only when libpipewire-0.3 is present (see app/CMakeLists.txt).
+// Binds one dsp::Node to a PipeWire filter node created on a SHARED PwClient.
+// Because the client is shared (not owned), many PwStages can live in ONE process
+// → a multi-node PipeWire graph hosted in a single binary (hermes_abox), as well as
+// the one-node-per-process form (hermes_pw_*). The caller owns the client and calls
+// connect()/run(); PwStage just creates + holds its filter node.
 namespace hermes::pw {
 
 class PwStage {
 public:
-    PwStage(const char* nodeName, std::unique_ptr<dsp::Node> node,
+    PwStage(PwClient& client, const char* name, std::unique_ptr<dsp::Node> node,
             int channelsIn, int channelsOut);
     ~PwStage();
     PwStage(const PwStage&) = delete;
     PwStage& operator=(const PwStage&) = delete;
 
-    int  init(int sampleRate, int quantum);   // pw_init, create filter + per-channel ports
-    void run();                               // pw_main_loop_run (blocks)
-    void quit();
+    int attach(int sampleRate, int quantum);   // create + connect this node on the shared client
 
 private:
     struct Impl;

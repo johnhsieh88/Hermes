@@ -1,26 +1,23 @@
 #include "audio_core/pipewire/PwStage.hpp"
-#include "audio_core/pipewire/Pw.hpp"
 #include <cstring>
 
-// PwStage binds one dsp::Node to a PipeWire filter node via the Pw.hpp wrapper
-// (PwClient + create_pw_node). No pipewire.h here — all PipeWire calls live in
-// Pw.cpp. The DSP node bypasses for now, so the stage passes audio through.
+// PwStage binds a dsp::Node to a filter node on a SHARED PwClient (Pw.hpp wrapper).
+// No pipewire.h here — all PipeWire calls live in Pw.cpp. DSP nodes bypass for now.
 namespace hermes::pw {
 
 struct PwStage::Impl {
+    PwClient&                     client;
     const char*                   name;
     std::unique_ptr<dsp::Node>    node;
     int                           chIn  = 0;
     int                           chOut = 0;
-    PwClient                      client;
-    std::unique_ptr<PwFilterNode> filterNode;
+    std::unique_ptr<PwFilterNode> pwnode;
     dsp::AudioBuffer              in{};
     dsp::AudioBuffer              out{};
-    explicit Impl(const char* app) : name(app), client(app) {}
+    Impl(PwClient& c, const char* n) : client(c), name(n) {}
 
-    // Per-quantum (static member → can access Impl; usable as a BlockFn pointer):
-    // PipeWire hands us mono channel pointers → fill AudioBuffer → node->process()
-    // → write output channels.
+    // Per-quantum bridge (static → usable as a BlockFn): PipeWire mono channel
+    // pointers → AudioBuffer → node->process() → output channels.
     static void block(void* user, const float* const* in, int chIn,
                       float* const* out, int chOut, uint32_t n, uint64_t samplePos) {
         auto* d = static_cast<Impl*>(user);
@@ -40,8 +37,9 @@ struct PwStage::Impl {
     }
 };
 
-PwStage::PwStage(const char* nodeName, std::unique_ptr<dsp::Node> node, int channelsIn, int channelsOut)
-    : impl_(std::make_unique<Impl>(nodeName)) {
+PwStage::PwStage(PwClient& client, const char* name, std::unique_ptr<dsp::Node> node,
+                 int channelsIn, int channelsOut)
+    : impl_(std::make_unique<Impl>(client, name)) {
     impl_->node  = std::move(node);
     impl_->chIn  = channelsIn;
     impl_->chOut = channelsOut;
@@ -49,14 +47,10 @@ PwStage::PwStage(const char* nodeName, std::unique_ptr<dsp::Node> node, int chan
 
 PwStage::~PwStage() = default;
 
-int PwStage::init(int sampleRate, int quantum) {
-    if (impl_->client.connect() != 0) return -1;
-    impl_->filterNode = create_pw_node(impl_->client, impl_->name, impl_->chIn, impl_->chOut,
-                                       &Impl::block, impl_.get(), sampleRate, quantum);
-    return impl_->filterNode ? 0 : -1;
+int PwStage::attach(int sampleRate, int quantum) {
+    impl_->pwnode = create_pw_node(impl_->client, impl_->name, impl_->chIn, impl_->chOut,
+                                   &Impl::block, impl_.get(), sampleRate, quantum);
+    return impl_->pwnode ? 0 : -1;
 }
-
-void PwStage::run()  { impl_->client.run(); }
-void PwStage::quit() { impl_->client.quit(); }
 
 } // namespace hermes::pw

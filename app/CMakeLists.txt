@@ -44,7 +44,17 @@ if(PIPEWIRE_FOUND)
         target_link_libraries(hermes_pw_${stage}
             PRIVATE hermes_dsp hermes_common ${PIPEWIRE_LIBRARIES})
     endforeach()
-    message(STATUS "Hermes: PipeWire found — building single-node island + per-stage nodes.")
+
+    # Single ABOX binary hosting the SAME multi-node graph in ONE process (one
+    # PipeWire client/loop, N pw_filter nodes). Preferred deploy: one binary.
+    add_executable(hermes_abox
+        audio_core/pipewire/Pw.cpp
+        audio_core/pipewire/PwStage.cpp
+        audio_core/pipewire/abox_main.cpp)
+    target_include_directories(hermes_abox PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PIPEWIRE_INCLUDE_DIRS})
+    target_link_libraries(hermes_abox PRIVATE hermes_dsp hermes_common ${PIPEWIRE_LIBRARIES})
+
+    message(STATUS "Hermes: PipeWire found — building single-node island, per-stage nodes, and hermes_abox.")
 else()
     message(STATUS "Hermes: PipeWire not found — audio_core builds DSP chain without the SPA node.")
 endif()
