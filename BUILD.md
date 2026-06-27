@@ -65,3 +65,32 @@ So the §9.5 kernel cmdline and `Thread_Pin` affinities must target the **A76 co
 for the DSP, e.g. `isolcpus=4-7 nohz_full=4-7 rcu_nocbs=4-7 irqaffinity=0-3`, with the
 ALSA/I2S IRQ affined to an A76 (e.g. CPU4). Treat the SDS core numbers as a template and
 substitute the RK3588 mapping (big = 4–7, LITTLE = 0–3).
+
+---
+
+## Basic playback test on the RK3588 target
+
+`hermes_abox` is the audio engine: **one** PipeWire filter `hermes.abox` (2 mic-in, 1 mono-out)
+whose `on_process` runs the C buffer-pool engine over the DSP node graph (src→aec→beamform→ses).
+By default it engages the **async buffer pool** — one worker thread per slot on the A76 big
+cores (cpu5..) so a slow block degrades to one Soft-Mute period instead of stalling the loop.
+`HERMES_SYNC=1` forces the single-threaded inline path (1-block latency, no worker threads).
+
+```bash
+# 1) cross-build → build-rk3588/app/hermes_abox (aarch64 ELF)
+./scripts/build.sh
+
+# 2) copy to the device (PipeWire + WirePlumber must be running there)
+scp build-rk3588/app/hermes_abox scripts/run_target.sh root@<rk3588>:/tmp/
+
+# 3) ON the target — run the basic playback test (engine + link + push a tone)
+#    HERMES_SYNC=1 ./hermes_abox   # to compare the synchronous path
+cd /tmp && ./run_target.sh ./hermes_abox 8
+```
+
+`run_target.sh` starts the engine, discovers the default mic (`capture_*`) and speaker
+(`playback_*`) ports, and links **mic → `hermes.abox` → speaker** (engine ports are
+`hermes.abox:in_0`, `in_1`, `out_0`; mono out fans to both speaker channels). With the DSP
+nodes still passthrough stubs, this validates the **full audio path** — you should hear the
+mic out the speaker (~1 block delay). Watch xruns/latency live with `pw-top` (the `hermes.abox`
+row). No mic? feed a file: `pw-play --target hermes.abox file.wav`.

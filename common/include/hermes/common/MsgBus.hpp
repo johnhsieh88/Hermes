@@ -55,12 +55,16 @@ protected:
     static void* RecvMsgTaskStatic(void* context);
 
     int       mMyId;       // this module's ModuleId (set by ConnectMsg)
-    int       mMyQ;        // this module's inbound mq descriptor
+    int       mMyQ;        // this module's inbound mq descriptor (mqd_t; -1 = closed)
     int       mWaitMs;
     pthread_t mRecvTask;
     std::atomic<bool> mConnected;
+    bool      mRecvStarted = false;   // whether the recv thread was spawned (for clean join)
 
     static constexpr size_t kMaxQueueDepth = 4096;
+    static constexpr size_t kMqMsgSize = sizeof(CMsgHead) + 256;  // header + inline POD body
+    static constexpr long   kMqMaxMsg  = 10;                      // depth (unprivileged mq limit)
+    unsigned char mRecvBuf[kMqMsgSize] = {0};                     // recv-thread scratch (single drainer)
 };
 
 } // namespace hermes

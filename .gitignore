@@ -1,4 +1,6 @@
 build/
+build-native/
+build-rk3588/
 out/
 *.o
 *.a
