@@ -37,6 +37,7 @@ static void bp_pin(int core_id, int prio) {
 void hermes_pipeline_init(hermes_buffered_pipeline* e, int sample_rate) {
     memset(e, 0, sizeof(*e));
     abox_graph_init(&e->graph);
+    abox_vdma_init(&e->dma);
     e->sample_rate   = sample_rate;
     e->next_core_idx = 0;
     e->pool          = NULL;
@@ -58,6 +59,38 @@ void hermes_pipeline_set_pool(hermes_buffered_pipeline* e, abox_worker_pool* poo
 
 void hermes_pipeline_set_mode(hermes_buffered_pipeline* e, abox_mode mode) {
     atomic_store_explicit(&e->mode, (int)mode, memory_order_release);
+}
+
+void hermes_pipeline_set_vdma(hermes_buffered_pipeline* e, abox_node* vin, abox_node* vout) {
+    e->vdma_in  = vin;
+    e->vdma_out = vout;
+}
+
+/* capture → slot `d`. Uses the ingress vDMA NODE if wired, else the xfer primitive. */
+static void bp_ingest(hermes_buffered_pipeline* e, abox_frame* d,
+                      const float* const* in_chan, int in_channels, int frames) {
+    if (e->vdma_in) {
+        abox_vdma_bind(e->vdma_in, (float**)in_chan, in_channels, frames);   /* IN reads only */
+        e->vdma_in->ops->process(e->vdma_in, d);                            /* ext → slot */
+    } else {
+        abox_vdma_xfer(&e->dma, d->chan, in_chan, in_channels, frames);
+    }
+    d->channels = in_channels;
+    d->frames   = frames;
+}
+
+/* slot `s` → playback out_chan (≤ out_channels; unproduced ports silenced). */
+static void bp_egress(hermes_buffered_pipeline* e, abox_frame* s,
+                      float* const* out_chan, int out_channels, int frames) {
+    const int produced = (s->channels < out_channels) ? s->channels : out_channels;
+    if (e->vdma_out) {
+        abox_vdma_bind(e->vdma_out, (float**)out_chan, out_channels, frames);
+        e->vdma_out->ops->process(e->vdma_out, s);                          /* slot → ext */
+    } else {
+        abox_vdma_xfer(&e->dma, out_chan, (const float* const*)s->chan, produced, frames);
+    }
+    for (int c = produced; c < out_channels; ++c)
+        if (out_chan && out_chan[c]) memset(out_chan[c], 0, sizeof(float) * (size_t)frames);
 }
 
 /* Job wrapper: run the whole mask-gated cascade on a borrowed A76 core (§10.7 fan-out). */
@@ -128,12 +161,7 @@ static int bp_tick_async(hermes_buffered_pipeline* e,
     /* 1) COLLECT — write at most out_channels ports (the produced channels, else silence). */
     const uint32_t o = e->out_idx;
     if (atomic_load_explicit(&e->slot_state[o], memory_order_acquire) == SLOT_DONE) {
-        abox_frame* s = &e->worker_buffers[o];
-        for (int c = 0; c < out_channels; ++c)
-            if (out_chan && out_chan[c]) {
-                if (c < s->channels && s->chan[c]) memcpy(out_chan[c], s->chan[c], sizeof(float) * (size_t)frames);
-                else                               memset(out_chan[c], 0, sizeof(float) * (size_t)frames);
-            }
+        bp_egress(e, &e->worker_buffers[o], out_chan, out_channels, frames);   /* slot → playback (vDMA) */
         atomic_store_explicit(&e->slot_state[o], SLOT_FREE, memory_order_release);
         e->out_idx = (o + 1) % HERMES_NUM_WORKER_CORES;
         atomic_fetch_add_explicit(&e->processed, 1, memory_order_relaxed);
@@ -146,10 +174,7 @@ static int bp_tick_async(hermes_buffered_pipeline* e,
     const uint32_t j = e->in_idx;
     if (atomic_load_explicit(&e->slot_state[j], memory_order_acquire) == SLOT_FREE) {
         abox_frame* d = &e->worker_buffers[j];
-        for (int c = 0; c < in_channels; ++c)
-            if (in_chan && in_chan[c]) memcpy(d->chan[c], in_chan[c], sizeof(float) * (size_t)frames);
-        d->channels = in_channels;
-        d->frames   = frames;
+        bp_ingest(e, d, in_chan, in_channels, frames);                   /* capture → slot (vDMA) */
         d->sample_pos = sample_pos;
         d->rate     = (uint32_t)e->sample_rate;
         e->slot_mode[j] = (abox_mode)atomic_load_explicit(&e->mode, memory_order_acquire);
@@ -187,10 +212,7 @@ int hermes_pipeline_process_tick(hermes_buffered_pipeline* e,
     /* §3.1 step 5 — copy the read-only driver input into this slot's provisioned memory,
      * decoupling processing from the driver buffer (so the slot can be held across periods). */
     abox_frame* io = &e->worker_buffers[target];
-    for (int c = 0; c < in_channels; ++c)
-        if (in_chan && in_chan[c]) memcpy(io->chan[c], in_chan[c], sizeof(float) * (size_t)frames);
-    io->channels   = in_channels;
-    io->frames     = frames;
+    bp_ingest(e, io, in_chan, in_channels, frames);                      /* capture → slot (vDMA) */
     io->sample_pos = sample_pos;
     io->rate       = (uint32_t)e->sample_rate;
     const abox_mode mode = (abox_mode)atomic_load_explicit(&e->mode, memory_order_acquire);
@@ -210,11 +232,7 @@ int hermes_pipeline_process_tick(hermes_buffered_pipeline* e,
     }
 
     /* Egress: slot result → the PipeWire playback buffer (≤ out_channels ports). */
-    for (int c = 0; c < out_channels; ++c)
-        if (out_chan && out_chan[c]) {
-            if (c < io->channels && io->chan[c]) memcpy(out_chan[c], io->chan[c], sizeof(float) * (size_t)frames);
-            else                                 memset(out_chan[c], 0, sizeof(float) * (size_t)frames);
-        }
+    bp_egress(e, io, out_chan, out_channels, frames);   /* slot → playback (vDMA) */
 
     /* §3.1 step 7 — release the slot. */
     atomic_store_explicit(&e->core_in_progress[target], 0, memory_order_release);

@@ -5,6 +5,7 @@ add_library(hermes_abox_c STATIC
     abox_graph.c
     reference_manager.c
     worker_pool.c
+    abox_vdma.c
     buffer_pipeline.c
     abox_nodes.c              # factory: type name → constructor
     nodes/node_common.c       # shared allocator + default vtable slots

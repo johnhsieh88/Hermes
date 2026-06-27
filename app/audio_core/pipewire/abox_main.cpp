@@ -4,6 +4,7 @@
 // ONLY pw_* boundary (the bridge); the nodes never see PipeWire. The control module drives
 // the engine's EngineMode atomically from SET_MODE (approach B, no re-routing).
 #include "audio_core/abox/abox_nodes.h"
+#include "audio_core/abox/abox_vdma.h"
 #include "audio_core/abox/buffer_pipeline.h"
 #include "audio_core/abox/reference_manager.h"
 #include "audio_core/pipewire/Pw.hpp"
@@ -74,6 +75,14 @@ int main() {
     beam->ops->prepare(beam, &cfg); ses->ops->prepare(ses, &cfg);
     abox_aec_set_ref(aec, &ref);
 
+    // Ingress/egress as real vDMA NODES (capture→slot / slot→playback). The coordinator
+    // runs them on the RT thread, so they work with the async pool too.
+    abox_node* vin  = abox_vdma_create(ABOX_VDMA_IN);
+    abox_node* vout = abox_vdma_create(ABOX_VDMA_OUT);
+    if (!vin || !vout) return 4;
+    vin->ops->prepare(vin, &cfg);   vout->ops->prepare(vout, &cfg);
+    hermes_pipeline_set_vdma(&engine, vin, vout);
+
     hermes_pipeline_add_stage(&engine, src,  ABOX_ELEM_SRC);
     hermes_pipeline_add_stage(&engine, aec,  ABOX_ELEM_AEC);
     hermes_pipeline_add_stage(&engine, beam, ABOX_ELEM_BEAM);
@@ -102,5 +111,6 @@ int main() {
     hermes_pipeline_stop_async(&engine);
     abox_node_destroy(src);  abox_node_destroy(aec);
     abox_node_destroy(beam); abox_node_destroy(ses);
+    abox_node_destroy(vin);  abox_node_destroy(vout);
     return 0;
 }

@@ -3,6 +3,7 @@
  * the self-claim worker pool, and the param-store double-buffer. Exit 0 = all pass. */
 #include "audio_core/abox/abox_node.h"
 #include "audio_core/abox/abox_nodes.h"
+#include "audio_core/abox/abox_vdma.h"
 #include "audio_core/abox/buffer_pipeline.h"
 #include "audio_core/abox/param_store.h"
 #include "audio_core/abox/reference_manager.h"
@@ -272,8 +273,49 @@ static void test_async_pipeline(void) {
     abox_node_destroy(beam); abox_node_destroy(ses);
 }
 
+/* Virtual DMA: the xfer primitive copies planar channels + counts transfers; the node
+ * form moves between a bound external buffer and the frame (ingress IN / egress OUT). */
+static void test_vdma(void) {
+    abox_vdma dma; abox_vdma_init(&dma);
+    float s0[4] = {1,2,3,4}, s1[4] = {5,6,7,8}, d0[4] = {0}, d1[4] = {0};
+    const float* src[2] = { s0, s1 };
+    float*       dst[2] = { d0, d1 };
+    abox_vdma_xfer(&dma, dst, src, 2, 4);
+    for (int i = 0; i < 4; ++i) { assert(feq(d0[i], s0[i])); assert(feq(d1[i], s1[i])); }
+    assert(dma.transfers == 1 && dma.samples == 8);
+
+    abox_config cfg; memset(&cfg, 0, sizeof(cfg));
+
+    /* IN: external → frame */
+    abox_node* vin = abox_vdma_create(ABOX_VDMA_IN);
+    assert(vin); vin->ops->prepare(vin, &cfg);
+    float e0[4] = {9,8,7,6}, e1[4] = {1,1,1,1};
+    float* ext[2] = { e0, e1 };
+    abox_vdma_bind(vin, ext, 2, 4);
+    float f0[4] = {0}, f1[4] = {0};
+    abox_frame io; io.chan[0] = f0; io.chan[1] = f1; io.channels = 0; io.frames = 4;
+    vin->ops->process(vin, &io);
+    assert(io.channels == 2);
+    for (int i = 0; i < 4; ++i) { assert(feq(f0[i], e0[i])); assert(feq(f1[i], e1[i])); }
+
+    /* OUT: frame → external */
+    abox_node* vout = abox_vdma_create(ABOX_VDMA_OUT);
+    assert(vout); vout->ops->prepare(vout, &cfg);
+    float o0[4] = {0}, o1[4] = {0};
+    float* oext[2] = { o0, o1 };
+    abox_vdma_bind(vout, oext, 2, 4);
+    vout->ops->process(vout, &io);                       /* io still holds e0/e1 */
+    for (int i = 0; i < 4; ++i) { assert(feq(o0[i], e0[i])); assert(feq(o1[i], e1[i])); }
+    const abox_vdma* st = abox_vdma_node_stats(vout);
+    assert(st && st->transfers == 1);
+
+    abox_node_destroy(vin);
+    abox_node_destroy(vout);
+}
+
 int main(void) {
     test_routing_mask();
+    test_vdma();
     test_graph_mask_gating();
     test_reference_manager();
     test_worker_pool();

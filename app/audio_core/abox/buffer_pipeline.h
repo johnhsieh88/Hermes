@@ -11,6 +11,7 @@
 #define HERMES_ABOX_BUFFER_PIPELINE_H
 
 #include "audio_core/abox/abox_node.h"
+#include "audio_core/abox/abox_vdma.h"
 #include "audio_core/abox/worker_pool.h"
 #include "audio_core/abox/abox_atomic.h"
 
@@ -24,6 +25,9 @@ extern "C" {
 
 typedef struct {
     abox_graph        graph;        /* the mask-gated DSP route (abox_graph_tick) */
+    abox_vdma         dma;          /* virtual DMA engine (fallback when no vDMA nodes set) */
+    abox_node*        vdma_in;      /* host-owned ingress vDMA node (capture→slot); NULL → use dma */
+    abox_node*        vdma_out;     /* host-owned egress  vDMA node (slot→playback); NULL → use dma */
     abox_worker_pool* pool;         /* optional A76 standing pool; NULL = run inline on caller */
     ABOX_ATOMIC(int)  mode;         /* engine mode — control plane → RT (atomic swap, §4.2) */
     int               sample_rate;
@@ -53,6 +57,12 @@ void hermes_pipeline_init(hermes_buffered_pipeline* e, int sample_rate);
 int  hermes_pipeline_add_stage(hermes_buffered_pipeline* e, abox_node* node, abox_elem elem);
 void hermes_pipeline_set_pool(hermes_buffered_pipeline* e, abox_worker_pool* pool);
 void hermes_pipeline_set_mode(hermes_buffered_pipeline* e, abox_mode mode);
+
+/* Wire host-owned ingress/egress vDMA NODES (abox_vdma_create IN/OUT). When set, the
+ * coordinator runs them on the RT thread for the capture→slot / slot→playback moves
+ * (instead of the internal xfer primitive) — so the vDMA is a real, composable node in
+ * the live engine. The host owns their lifetime. Pass NULL to revert to the primitive. */
+void hermes_pipeline_set_vdma(hermes_buffered_pipeline* e, abox_node* vin, abox_node* vout);
 
 /* The coordinator hook (SDD §3.1). in_chan[0..in_channels) are the PipeWire capture-port
  * buffers (read-only); out_chan[0..out_channels) are the playback-port buffers. Input/output
