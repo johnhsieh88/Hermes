@@ -41,6 +41,7 @@ typedef struct {
 
     ABOX_ATOMIC(unsigned long) drops;        /* soft-drops on overrun (firewall fired) */
     ABOX_ATOMIC(unsigned long) processed;    /* blocks processed to completion */
+    ABOX_ATOMIC(float) gain;                 /* master output gain (control plane → RT egress); 1.0 = unity */
 
     /* ── Async mode (one worker thread per slot; real cross-period pipeline) ── */
     int              async_active;                               /* set once at start_async (RT reads) */
@@ -57,6 +58,7 @@ void hermes_pipeline_init(hermes_buffered_pipeline* e, int sample_rate);
 int  hermes_pipeline_add_stage(hermes_buffered_pipeline* e, abox_node* node, abox_elem elem);
 void hermes_pipeline_set_pool(hermes_buffered_pipeline* e, abox_worker_pool* pool);
 void hermes_pipeline_set_mode(hermes_buffered_pipeline* e, abox_mode mode);
+void hermes_pipeline_set_gain(hermes_buffered_pipeline* e, float gain);   /* master out gain; 1.0 = unity */
 
 /* Wire host-owned ingress/egress vDMA NODES (abox_vdma_create IN/OUT). When set, the
  * coordinator runs them on the RT thread for the capture→slot / slot→playback moves

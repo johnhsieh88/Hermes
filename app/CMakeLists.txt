@@ -16,6 +16,11 @@ hermes_process(hermes_video_proc      video_proc/main.cpp)
 hermes_process(hermes_cloud_connector cloud_connector/main.cpp)
 hermes_process(hermes_codec_hw        codec_hw/main.cpp)
 
+# Dev/test web bridge (ModuleId 7): browser → control CMsg on the bus. Host-only test tool,
+# not flashed to the device. The embedded UI (gui_page.inc) is #included from the source dir.
+hermes_process(hermes_gui_interface   gui_interface/gui_main.cpp)
+target_include_directories(hermes_gui_interface PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gui_interface)
+
 # Audio process (hermes_abox): ONE PipeWire filter whose on_process drives the C buffer-pool
 # coordinator over the abox_node graph (Model B). The bridge (abox_main.cpp) is the only
 # pw_* boundary. Built only when libpipewire-0.3 is present.

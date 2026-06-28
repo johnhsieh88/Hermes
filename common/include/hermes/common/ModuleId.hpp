@@ -12,6 +12,7 @@ enum {
     VIDEO_PROC      = 4,  // A/V sync
     CLOUD_CONNECTOR = 5,  // on-target proxy: PipeWire client <-> network (STT/LLM/TTS)
     CODEC_HW        = 6,  // I2C codec + /dev/input buttons
+    GUI_INTERFACE   = 7,  // dev/test web bridge: HTTP UI → control CMsg on the bus (not on device)
 };
 } // namespace ModuleId
 } // namespace hermes

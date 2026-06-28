@@ -23,6 +23,7 @@ class AudioCore : public MsgBus, public EventMap<AudioCore> {
 public:
     explicit AudioCore(hermes_buffered_pipeline* eng) : eng_(eng) {
         Add(_AudioCore::cmd::SET_MODE,       &AudioCore::onSetMode);
+        Add(_AudioCore::cmd::SET_VOLUME,     &AudioCore::onSetVolume);
         Add(_AudioCore::cmd::RESET_PIPELINE, &AudioCore::onReset);
         // TODO: START_CAPTURE / DUCK_PLAYBACK / ARM_BARGE_IN → finer controls.
     }
@@ -34,6 +35,10 @@ private:
             const int v = *static_cast<const int*>(m->pBody);   // EngineMode == abox_mode values
             hermes_pipeline_set_mode(eng_, static_cast<abox_mode>(v));
         }
+    }
+    void onSetVolume(const CMsg* m) {
+        if (m->pBody && m->hdr.length >= sizeof(float))
+            hermes_pipeline_set_gain(eng_, *static_cast<const float*>(m->pBody));  // 0..N, 1.0 = unity
     }
     void onReset(const CMsg*) {}                       // TODO: §6.2 reset pipeline
     hermes_buffered_pipeline* eng_;
@@ -100,6 +105,11 @@ int main() {
     // Soft-Mute period instead of stalling the loop. HERMES_SYNC=1 forces the inline path.
     if (!std::getenv("HERMES_SYNC"))
         hermes_pipeline_start_async(&engine, /*first_core=*/5);
+
+    // Optional initial EngineMode for headless tests (0=KeywordListening idle/bypass-all,
+    // 1=BargeInMuting, 2=CloudStreaming full-duplex). Default stays KEYWORD_LISTENING.
+    if (const char* ms = std::getenv("HERMES_MODE"))
+        hermes_pipeline_set_mode(&engine, static_cast<abox_mode>(std::atoi(ms)));
 
     // ONE pw_filter: 2 mic-in, 1 mono-out; on_process walks the whole C graph (Model B).
     // Links (mic→hermes.abox→sink) are created by the init process / WirePlumber.

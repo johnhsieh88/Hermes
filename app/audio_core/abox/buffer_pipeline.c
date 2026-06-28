@@ -49,6 +49,7 @@ void hermes_pipeline_init(hermes_buffered_pipeline* e, int sample_rate) {
     }
     atomic_store_explicit(&e->drops, 0, memory_order_relaxed);
     atomic_store_explicit(&e->processed, 0, memory_order_relaxed);
+    atomic_store_explicit(&e->gain, 1.0f, memory_order_relaxed);
 }
 
 int hermes_pipeline_add_stage(hermes_buffered_pipeline* e, abox_node* node, abox_elem elem) {
@@ -59,6 +60,11 @@ void hermes_pipeline_set_pool(hermes_buffered_pipeline* e, abox_worker_pool* poo
 
 void hermes_pipeline_set_mode(hermes_buffered_pipeline* e, abox_mode mode) {
     atomic_store_explicit(&e->mode, (int)mode, memory_order_release);
+}
+
+void hermes_pipeline_set_gain(hermes_buffered_pipeline* e, float gain) {
+    if (gain < 0.0f) gain = 0.0f;
+    atomic_store_explicit(&e->gain, gain, memory_order_relaxed);
 }
 
 void hermes_pipeline_set_vdma(hermes_buffered_pipeline* e, abox_node* vin, abox_node* vout) {
@@ -91,6 +97,13 @@ static void bp_egress(hermes_buffered_pipeline* e, abox_frame* s,
     }
     for (int c = produced; c < out_channels; ++c)
         if (out_chan && out_chan[c]) memset(out_chan[c], 0, sizeof(float) * (size_t)frames);
+
+    /* Master output gain (control plane → RT). Skip the multiply at unity. */
+    const float g = atomic_load_explicit(&e->gain, memory_order_relaxed);
+    if (g != 1.0f)
+        for (int c = 0; c < produced; ++c)
+            if (out_chan && out_chan[c])
+                for (int i = 0; i < frames; ++i) out_chan[c][i] *= g;
 }
 
 /* Job wrapper: run the whole mask-gated cascade on a borrowed A76 core (§10.7 fan-out). */
