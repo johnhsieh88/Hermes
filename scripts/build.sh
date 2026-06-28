@@ -35,7 +35,7 @@ case "$MODE" in
   native) DEPS="cmake make g++ pkg-config libpipewire-0.3-dev"; TESTS=OFF ;;
   test)   DEPS="cmake make g++ pkg-config libpipewire-0.3-dev libgtest-dev"; TESTS=ON  ;;
   run)    DEPS="cmake make g++ pkg-config libpipewire-0.3-dev pipewire wireplumber"; TESTS=OFF ;;
-  *)      echo "usage: $0 {cross|native|run|test}"; exit 2 ;;
+  *)      echo "usage: $0 {cross|native|run|test}   (audio loopback: scripts/run_loopback.sh)"; exit 2 ;;
 esac
 
 echo ">> Native arm64 '$MODE' in $IMAGE"

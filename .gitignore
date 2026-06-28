@@ -1,7 +1,9 @@
 build/
 build-native/
 build-rk3588/
+build-mac/
 out/
+out_loopback.log
 *.o
 *.a
 compile_commands.json

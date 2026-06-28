@@ -273,6 +273,57 @@ static void test_async_pipeline(void) {
     abox_node_destroy(beam); abox_node_destroy(ses);
 }
 
+/* Loopback / bypass (BASIC TC, mirrors scripts/run_loopback.sh at unit level). With no DSP
+ * kernels yet every node is a passthrough, so the whole src→aec→beam→ses chain is an identity
+ * on chan[0]. Feeds a distinctive tone on the L mic and a DIFFERENT DC level on the R mic; once
+ * the buffer pool fills, the mono output must equal the L input BIT-EXACT — proving the full
+ * transport+graph path is lossless AND that beamform bypasses chan[0] (an average would fold in
+ * the R mic and break equality). This is the no-PipeWire twin of the on-target loopback. */
+static void test_loopback_bypass(void) {
+    hermes_buffered_pipeline e;
+    hermes_pipeline_init(&e, 48000);
+    abox_config cfg; memset(&cfg, 0, sizeof(cfg));
+    cfg.sample_rate = 48000; cfg.block_size = 240; cfg.mic_channels = 2;
+
+    abox_node* src  = abox_node_create("src");
+    abox_node* aec  = abox_node_create("aec");
+    abox_node* beam = abox_node_create("beamform");
+    abox_node* ses  = abox_node_create("ses");
+    assert(src && aec && beam && ses);
+    src->ops->prepare(src, &cfg);  aec->ops->prepare(aec, &cfg);
+    beam->ops->prepare(beam, &cfg); ses->ops->prepare(ses, &cfg);
+    hermes_pipeline_add_stage(&e, src,  ABOX_ELEM_SRC);
+    hermes_pipeline_add_stage(&e, aec,  ABOX_ELEM_AEC);
+    hermes_pipeline_add_stage(&e, beam, ABOX_ELEM_BEAM);
+    hermes_pipeline_add_stage(&e, ses,  ABOX_ELEM_SES);
+    hermes_pipeline_set_mode(&e, ABOX_MODE_CLOUD_STREAMING);   /* every stage active */
+
+    enum { BLK = 240 };
+    float in0[BLK], in1[BLK], out0[BLK];
+    const float* in[2]  = { in0, in1 };
+    float*       out[2] = { out0, NULL };
+    for (int i = 0; i < BLK; ++i) {
+        in0[i] = 0.25f * sinf(6.2831853f * 440.0f * (float)i / 48000.0f);   /* L: a tone */
+        in1[i] = 0.5f;                                                      /* R: distinct DC */
+    }
+    /* Feed the SAME block repeatedly so the steady-state result is independent of the
+     * pool's ~1-period fill latency. */
+    int matched = 0;
+    for (int blk = 0; blk < 6; ++blk) {
+        for (int i = 0; i < BLK; ++i) out0[i] = -99.0f;
+        assert(hermes_pipeline_process_tick(&e, in, 2, out, 1, BLK, (uint64_t)blk * BLK) == 0);
+        int eq = 1;
+        for (int i = 0; i < BLK; ++i) if (out0[i] != in0[i]) { eq = 0; break; }   /* bit-exact */
+        if (eq) matched = 1;
+    }
+    assert(matched);                                              /* output == L input, bit-exact */
+    assert(out0[0] != 0.5f * (in0[0] + in1[0]));                  /* NOT the L+R average → beamform bypassed */
+    assert(atomic_load(&e.drops) == 0);
+
+    abox_node_destroy(src);  abox_node_destroy(aec);
+    abox_node_destroy(beam); abox_node_destroy(ses);
+}
+
 /* Virtual DMA: the xfer primitive copies planar channels + counts transfers; the node
  * form moves between a bound external buffer and the frame (ingress IN / egress OUT). */
 static void test_vdma(void) {
@@ -324,6 +375,7 @@ int main(void) {
     test_src_node();
     test_playback_pipeline();
     test_async_pipeline();
+    test_loopback_bypass();
     printf("abox_selftest: all passed\n");
     return 0;
 }
