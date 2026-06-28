@@ -1,0 +1,18 @@
+# Keep host build caches and junk OUT of the image (the Dockerfile COPYs the repo so it
+# can cross-build straight from Docker Desktop with no bind mount). A macOS CMakeCache
+# baked into the image would poison the Linux configure — exclude every build dir.
+build/
+build-native/
+build-rk3588/
+out/
+*.o
+*.a
+compile_commands.json
+.cache/
+.DS_Store
+.git/
+.github/
+.claude/
+docs/
+test/
+*.md
