@@ -1,15 +1,12 @@
 /* beamform_node.c — Beamform (§4.2 MVDR/GSC): combine the echo-free channels into one
- * enhanced mono stream. Currently a naïve average (2→1); the steered MVDR/GSC kernel is
- * TODO. Reduces channel count in place — downstream reads chan[0]. */
+ * enhanced mono stream. The steered MVDR/GSC kernel is TODO, so this BYPASSES: it passes
+ * the primary mic (chan[0]) through bit-exact (output buffer == input buffer) and only
+ * drops to mono. Swap the spatial combiner in here when it lands. */
 #include "audio_core/abox/nodes/node_common.h"
 
 static void beam_process(abox_node* n, abox_frame* io) {
     (void)n;
-    if (io->channels >= 2 && io->chan[0] && io->chan[1]) {
-        for (int i = 0; i < io->frames; ++i)
-            io->chan[0][i] = 0.5f * (io->chan[0][i] + io->chan[1][i]);   /* TODO: MVDR/GSC steer */
-    }
-    io->channels = 1;   /* N → 1 in place */
+    io->channels = 1;   /* N → 1: keep chan[0] untouched (no spatial processing yet) */
 }
 
 static const abox_node_ops BEAM_OPS = {

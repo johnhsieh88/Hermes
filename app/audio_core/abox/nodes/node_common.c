@@ -17,3 +17,6 @@ void abox_node_default_prepare(abox_node* n, const abox_config* cfg) { (void)n; 
 void abox_node_default_configure(abox_node* n, uint32_t id)          { (void)n; (void)id; }
 void abox_node_default_reset(abox_node* n)                           { (void)n; }
 void abox_node_default_destroy(abox_node* n) { if (n) { free(n->state); free(n); } }
+
+/* BYPASS: in-place graph → untouched frame means output == input (see header). */
+void abox_node_default_process(abox_node* n, abox_frame* io)         { (void)n; (void)io; }

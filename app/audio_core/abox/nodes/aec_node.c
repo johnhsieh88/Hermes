@@ -19,26 +19,22 @@ static void aec_prepare(abox_node* n, const abox_config* cfg) {
 
 static void aec_process(abox_node* n, abox_frame* io) {
     aec_state* s = (aec_state*)n->state;
-    const float target = abox_route_gain(io->mode, ABOX_ELEM_AEC);   /* 0 bypass / 1 cancel */
-    const float rate   = 1.0f / (0.010f * (float)(s->sample_rate > 0 ? s->sample_rate : 48000));
 
-    /* Pull this block's time-aligned, post-fader reference (§4.3.2). The PBFDAF below
-     * consumes ref_aligned as its far-end. (Real cancellation: TODO PBFDAF + DTD.) */
+    /* Pull this block's time-aligned, post-fader reference (§4.3.2) — groundwork the PBFDAF
+     * kernel will consume as its far-end. */
     if (s->ref && io->frames <= ABOX_MAX_BLOCK)
         abox_ref_read_aligned(s->ref, s->ref_aligned, io->frames);
 
-    float m = s->mix;
-    for (int c = 0; c < io->channels; ++c) {
-        m = s->mix;
-        for (int i = 0; i < io->frames; ++i) {
-            m += (target > m) ? rate : (target < m ? -rate : 0.0f);
-            if (m < 0.0f) m = 0.0f; else if (m > 1.0f) m = 1.0f;
-            const float cancelled = io->chan[c][i];   /* TODO: PBFDAF echo-cancelled sample */
-            const float bypass    = io->chan[c][i];
-            io->chan[c][i] = m * cancelled + (1.0f - m) * bypass;
-        }
-    }
-    s->mix = (io->channels > 0) ? m : (target > s->mix ? s->mix + rate : s->mix - rate);
+    /* BYPASS until the PBFDAF kernel + DTD land: there is no echo-cancelled signal yet, so
+     * the mode-ramped blend would be a (lossy) identity. Pass audio through unchanged —
+     * output buffer == input buffer. The ramp toward the active state still advances so the
+     * crossfade is ready the moment a real cancelled stream exists. */
+    const float target = abox_route_gain(io->mode, ABOX_ELEM_AEC);   /* 0 bypass / 1 cancel */
+    const float rate   = 1.0f / (0.010f * (float)(s->sample_rate > 0 ? s->sample_rate : 48000));
+    s->mix += (target > s->mix) ? rate * (float)io->frames
+                                : (target < s->mix ? -rate * (float)io->frames : 0.0f);
+    if (s->mix < 0.0f) s->mix = 0.0f; else if (s->mix > 1.0f) s->mix = 1.0f;
+    /* (When PBFDAF is in: io->chan[c][i] = mix*cancelled[i] + (1-mix)*io->chan[c][i].) */
 }
 
 static const abox_node_ops AEC_OPS = {

@@ -21,6 +21,11 @@ void abox_node_default_configure(abox_node* n, uint32_t param_set_id);
 void abox_node_default_reset(abox_node* n);
 void abox_node_default_destroy(abox_node* n);
 
+/* Default process == BYPASS. Processing is in place on one shared frame, so leaving it
+ * untouched means the output buffer IS the input buffer (bit-exact passthrough). Any node
+ * whose DSP kernel is not implemented yet wires this so audio still flows unchanged. */
+void abox_node_default_process(abox_node* n, abox_frame* io);
+
 /* Per-type constructors — one per node source file. */
 abox_node* abox_src_create(void);
 abox_node* abox_aec_create(void);
