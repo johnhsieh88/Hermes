@@ -1,9 +1,7 @@
 #include "audio_core/pipewire/Pw.hpp"
 
 #include <pipewire/pipewire.h>
-#include <spa/param/audio/format-utils.h>
 #include <cstdio>
-#include <cstring>
 #include <vector>
 
 // The ONLY file that includes <pipewire/pipewire.h>. Built only when
@@ -126,96 +124,6 @@ std::unique_ptr<PwFilterNode> create_pw_node(PwClient& client, const char* name,
     auto node = std::make_unique<PwFilterNode>(client, name, chIn, chOut, fn, user);
     if (node->connect(sampleRate, quantum) < 0) return nullptr;
     return node;
-}
-
-// ───────────────────────── PwStream (capture / playback) ────────────────────────
-struct PwStream::Impl {
-    pw_stream*      stream   = nullptr;
-    spa_hook        listener{};
-    pw_stream_events events{};
-    Dir             dir      = CAPTURE;
-    StreamFn        fn       = nullptr;
-    void*           user     = nullptr;
-    uint32_t        rate     = 48000;
-
-    ~Impl() {
-        if (stream) { pw_stream_destroy(stream); stream = nullptr; }
-    }
-
-    static void on_process(void* data) {
-        auto& self = *static_cast<Impl*>(data);
-        pw_buffer* b = pw_stream_dequeue_buffer(self.stream);
-        if (!b) return;
-        spa_data& d  = b->buffer->datas[0];
-        float* pcm   = static_cast<float*>(d.data);
-        uint32_t nf;
-        if (self.dir == CAPTURE) {
-            nf = d.chunk->size / sizeof(float);
-        } else {
-            uint64_t req = b->requested;
-            nf = req ? (uint32_t)req : d.maxsize / sizeof(float);
-            if (nf * sizeof(float) > d.maxsize) nf = d.maxsize / sizeof(float);
-            std::memset(pcm, 0, nf * sizeof(float));
-        }
-        if (pcm && nf > 0 && self.fn)
-            self.fn(self.user, pcm, nf, self.rate);
-        if (self.dir == PLAYBACK) {
-            d.chunk->size   = nf * sizeof(float);
-            d.chunk->offset = 0;
-            d.chunk->stride = sizeof(float);
-        }
-        pw_stream_queue_buffer(self.stream, b);
-    }
-};
-
-PwStream::PwStream(PwClient& client, const char* name, Dir dir, StreamFn fn, void* user)
-    : impl_(std::make_unique<Impl>()) {
-    impl_->dir  = dir;
-    impl_->fn   = fn;
-    impl_->user = user;
-
-    impl_->events.version = PW_VERSION_STREAM_EVENTS;
-    impl_->events.process = &Impl::on_process;
-
-    impl_->stream = pw_stream_new(client.core(), name,
-        pw_properties_new(
-            PW_KEY_MEDIA_TYPE,     "Audio",
-            PW_KEY_MEDIA_CATEGORY, dir == CAPTURE ? "Capture" : "Playback",
-            PW_KEY_MEDIA_ROLE,     "Communication",
-            PW_KEY_NODE_NAME,      name,
-            nullptr));
-
-    pw_stream_add_listener(impl_->stream, &impl_->listener,
-                           &impl_->events, impl_.get());
-}
-
-PwStream::~PwStream() = default;
-PwStream::PwStream(PwStream&&) noexcept = default;
-PwStream& PwStream::operator=(PwStream&&) noexcept = default;
-
-int PwStream::connect(uint32_t sampleRate) {
-    impl_->rate = sampleRate;
-
-    uint8_t buf[1024];
-    spa_pod_builder b = SPA_POD_BUILDER_INIT(buf, sizeof buf);
-    spa_audio_info_raw info{};
-    info.format   = SPA_AUDIO_FORMAT_F32;
-    info.rate     = sampleRate;
-    info.channels = 1;
-    const spa_pod* params[1];
-    params[0] = spa_format_audio_raw_build(&b, SPA_PARAM_EnumFormat, &info);
-
-    pw_direction dir = (impl_->dir == CAPTURE) ? PW_DIRECTION_INPUT : PW_DIRECTION_OUTPUT;
-    return pw_stream_connect(impl_->stream, dir, PW_ID_ANY,
-        static_cast<pw_stream_flags>(
-            PW_STREAM_FLAG_AUTOCONNECT |
-            PW_STREAM_FLAG_MAP_BUFFERS |
-            PW_STREAM_FLAG_RT_PROCESS),
-        params, 1);
-}
-
-void PwStream::disconnect() {
-    if (impl_->stream) pw_stream_disconnect(impl_->stream);
 }
 
 } // namespace hermes::pw
