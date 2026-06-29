@@ -11,6 +11,7 @@
 #include "hermes/common/ModuleId.hpp"
 #include "hermes/common/MsgBus.hpp"
 #include "hermes/common/StoryMsg.hpp"
+#include "story_agent/http_client.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -27,19 +28,44 @@ struct Segment {
     std::string text;      // dialogue (stays local; only the index is sent on the bus)
 };
 
-// Memory facade — the mem0 sidecar sits behind these three calls (recall/remember/export).
-// Stubbed today; real calls dispatch to a worker thread so they never block the IPC loop.
+// Memory facade — talks to the local mem0 sidecar (services/memory/server.py) over HTTP.
+// recall = mem0.search (cheap, on the turn); remember = mem0.add (LLM extraction, heavy — ideally
+// fire-and-forget / batched at idle). If the sidecar is down, every call no-ops and the agent
+// runs fine (degraded memory). Endpoint via HERMES_MEM_HOST/PORT (default 127.0.0.1:7070).
 class Memory {
 public:
-    std::string recall(const std::string& /*user*/, const std::string& /*query*/) {
-        return "";   // TODO: mem0.search(user, query) → relevant facts
+    Memory() {
+        const char* h = std::getenv("HERMES_MEM_HOST");
+        const char* p = std::getenv("HERMES_MEM_PORT");
+        host_ = h ? h : "127.0.0.1";
+        port_ = p ? std::atoi(p) : 7070;
     }
-    void remember(const std::string& /*user*/, const std::string& /*turn*/) {
-        // TODO: mem0.add(user, turn) → ADD / UPDATE / DELETE conflict resolution
+    // Returns the connector's recalled facts (server flattens to {"facts":[...]}) for the prompt.
+    std::string recall(const std::string& user, const std::string& query) {
+        const std::string body = "{\"user_id\":\"" + esc(user) + "\",\"query\":\"" + esc(query) +
+                                 "\",\"top_k\":3}";
+        return http_post_json(host_, port_, "/search", body);   // "" if sidecar absent
+    }
+    void remember(const std::string& user, const std::string& turn) {
+        const std::string body = "{\"user_id\":\"" + esc(user) + "\",\"text\":\"" + esc(turn) + "\"}";
+        (void)http_post_json(host_, port_, "/add", body);       // TODO: dispatch on a worker thread
     }
     void exportMd(const std::string& /*user*/) {
-        // TODO: render brain/memory/*.md for parent auditing
+        // TODO: render brain/memory/*.md for parent auditing (from mem0 get_all)
     }
+
+private:
+    static std::string esc(const std::string& s) {
+        std::string o;
+        for (char c : s) {
+            if (c == '"' || c == '\\') { o += '\\'; o += c; }
+            else if (c == '\n') o += "\\n";
+            else o += c;
+        }
+        return o;
+    }
+    std::string host_;
+    int         port_ = 7070;
 };
 
 class StoryAgent : public MsgBus, public EventMap<StoryAgent> {
@@ -121,6 +147,13 @@ private:
 
 int main() {
     using namespace hermes;
+    // Ops/self-check: ping the mem0 sidecar and print what recall returns, then exit.
+    if (std::getenv("HERMES_MEM_PING")) {
+        Memory m;
+        const std::string r = m.recall("listener", "what do they like?");
+        std::printf("mem ping → %s\n", r.empty() ? "(no sidecar / empty)" : r.c_str());
+        return 0;
+    }
     const char* path = std::getenv("HERMES_STORY");
     StoryAgent agent;
     agent.loadScript(path ? path : "data/stories/example.md");

@@ -1,0 +1,8 @@
+# Hermes memory sidecar. The server itself is stdlib-only; mem0 brings the memory engine.
+mem0ai>=0.1.0
+# Local backends (no cloud) — install what you use:
+#   chromadb            # local vector store (MEM0_DB path)
+#   sentence-transformers  # HuggingFace embeddings (all-MiniLM-L6-v2)
+#   ollama              # local LLM client (run `ollama serve` + pull a small model)
+# For the extraction LLM you need EITHER a local Ollama model (MEM0_LLM=ollama) OR an
+# OpenAI key (MEM0_LLM=openai, OPENAI_API_KEY=...). Search/recall needs only the embedder.
