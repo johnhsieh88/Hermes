@@ -107,7 +107,7 @@ int main() {
         hermes_pipeline_start_async(&engine, /*first_core=*/5);
 
     // Optional initial EngineMode for headless tests (0=KeywordListening idle/bypass-all,
-    // 1=BargeInMuting, 2=CloudStreaming full-duplex). Default stays KEYWORD_LISTENING.
+    // 1=BargeInMuting, 2=Conversation full-duplex). Default stays KEYWORD_LISTENING.
     if (const char* ms = std::getenv("HERMES_MODE"))
         hermes_pipeline_set_mode(&engine, static_cast<abox_mode>(std::atoi(ms)));
 

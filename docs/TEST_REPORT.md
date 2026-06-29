@@ -26,7 +26,7 @@ Test cases and their status for the Hermes audio DSP framework. Covers the unit 
 
 | TC ID | Sub-case | Asserts | Status |
 |-------|----------|---------|--------|
-| ABOX-01 | `test_routing_mask` | per-mode `active_pipeline_mask` (idle=0, cloud=all, barge keeps AEC, no TTS) | ✅ |
+| ABOX-01 | `test_routing_mask` | per-mode `active_pipeline_mask` (idle=0, conversation=all, barge keeps AEC, no TTS) | ✅ |
 | ABOX-02 | `test_vdma` | vDMA xfer primitive + node form (ingress IN / egress OUT) copy correctness | ✅ |
 | ABOX-03 | `test_graph_mask_gating` | graph tick runs/skips stages by mode mask | ✅ |
 | ABOX-04 | `test_reference_manager` | AEC ref delay ring: zero-delay identity, shift, VI-Sense | ✅ |
@@ -40,7 +40,7 @@ Test cases and their status for the Hermes audio DSP framework. Covers the unit 
 
 ⭐ **ABOX-11** is the unit-level twin of the on-target audio loopback (TC SYS-04). It feeds a
 tone on the L mic and a different DC level on the R mic through every active node
-(CLOUD_STREAMING mode) and asserts the mono output equals the L input **bit-exact** — proving
+(CONVERSATION mode) and asserts the mono output equals the L input **bit-exact** — proving
 the transport+graph path is lossless and that every stub node passes audio through unchanged
 (`output buffer == input buffer`).
 

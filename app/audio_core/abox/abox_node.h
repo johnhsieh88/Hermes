@@ -21,7 +21,7 @@ extern "C" {
 typedef enum {
     ABOX_MODE_KEYWORD_LISTENING = 0,   /* idle/wake — AEC bypassed */
     ABOX_MODE_BARGE_IN_MUTING   = 1,   /* user interrupted — ducking; AEC active */
-    ABOX_MODE_CLOUD_STREAMING   = 2,   /* conversation — full duplex */
+    ABOX_MODE_CONVERSATION   = 2,   /* conversation — full duplex */
     ABOX_MODE_SYSTEM_RESET      = 3
 } abox_mode;
 

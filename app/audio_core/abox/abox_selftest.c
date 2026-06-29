@@ -20,9 +20,9 @@ static int feq(float a, float b) { return fabsf(a - b) < 1e-4f; }
 static void test_routing_mask(void) {
     assert(abox_active_mask(ABOX_MODE_KEYWORD_LISTENING) == 0u);
     assert(abox_active_mask(ABOX_MODE_SYSTEM_RESET) == 0u);
-    /* CloudStreaming engages every element. */
+    /* Conversation engages every element. */
     for (int e = 0; e < ABOX_ELEM_COUNT; ++e)
-        assert(abox_active_mask(ABOX_MODE_CLOUD_STREAMING) & abox_elem_bit((abox_elem)e));
+        assert(abox_active_mask(ABOX_MODE_CONVERSATION) & abox_elem_bit((abox_elem)e));
     /* BargeIn keeps AEC/capture, ducks TTS. */
     assert(abox_active_mask(ABOX_MODE_BARGE_IN_MUTING) & abox_elem_bit(ABOX_ELEM_AEC));
     assert(!(abox_active_mask(ABOX_MODE_BARGE_IN_MUTING) & abox_elem_bit(ABOX_ELEM_TTSOUT)));
@@ -48,7 +48,7 @@ static void test_graph_mask_gating(void) {
     assert(cs_aec.runs == 0 && cs_tts.runs == 0);
     assert(abox_graph_tick(&g, &io, ABOX_MODE_BARGE_IN_MUTING) == 1);     /* AEC only */
     assert(cs_aec.runs == 1 && cs_tts.runs == 0);
-    assert(abox_graph_tick(&g, &io, ABOX_MODE_CLOUD_STREAMING) == 2);     /* both */
+    assert(abox_graph_tick(&g, &io, ABOX_MODE_CONVERSATION) == 2);     /* both */
     assert(cs_aec.runs == 2 && cs_tts.runs == 1);
 }
 
@@ -127,8 +127,8 @@ static void test_buffer_pipeline(void) {
     assert(cs.runs == 0);
     assert(feq(o0[3], 3.0f));                 /* zero-copy in → egress copy out */
 
-    /* CloudStreaming → AEC runs. */
-    hermes_pipeline_set_mode(&e, ABOX_MODE_CLOUD_STREAMING);
+    /* Conversation → AEC runs. */
+    hermes_pipeline_set_mode(&e, ABOX_MODE_CONVERSATION);
     assert(hermes_pipeline_process_tick(&e, in, 2, out, 2, 8, 8) == 0);
     assert(cs.runs == 1);
 
@@ -200,7 +200,7 @@ static void test_playback_pipeline(void) {
     hermes_pipeline_add_stage(&e, aec,  ABOX_ELEM_AEC);
     hermes_pipeline_add_stage(&e, beam, ABOX_ELEM_BEAM);
     hermes_pipeline_add_stage(&e, ses,  ABOX_ELEM_SES);
-    hermes_pipeline_set_mode(&e, ABOX_MODE_CLOUD_STREAMING);   /* full duplex → all stages on */
+    hermes_pipeline_set_mode(&e, ABOX_MODE_CONVERSATION);   /* full duplex → all stages on */
 
     enum { BLK = 240 };
     float in0[BLK], in1[BLK], out0[BLK];
@@ -248,7 +248,7 @@ static void test_async_pipeline(void) {
     hermes_pipeline_add_stage(&e, aec,  ABOX_ELEM_AEC);
     hermes_pipeline_add_stage(&e, beam, ABOX_ELEM_BEAM);
     hermes_pipeline_add_stage(&e, ses,  ABOX_ELEM_SES);
-    hermes_pipeline_set_mode(&e, ABOX_MODE_CLOUD_STREAMING);
+    hermes_pipeline_set_mode(&e, ABOX_MODE_CONVERSATION);
 
     hermes_pipeline_start_async(&e, /*first_core=*/-1);   /* no pinning under test */
 
@@ -296,7 +296,7 @@ static void test_loopback_bypass(void) {
     hermes_pipeline_add_stage(&e, aec,  ABOX_ELEM_AEC);
     hermes_pipeline_add_stage(&e, beam, ABOX_ELEM_BEAM);
     hermes_pipeline_add_stage(&e, ses,  ABOX_ELEM_SES);
-    hermes_pipeline_set_mode(&e, ABOX_MODE_CLOUD_STREAMING);   /* every stage active */
+    hermes_pipeline_set_mode(&e, ABOX_MODE_CONVERSATION);   /* every stage active */
 
     enum { BLK = 240 };
     float in0[BLK], in1[BLK], out0[BLK];

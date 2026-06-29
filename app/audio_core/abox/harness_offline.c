@@ -71,7 +71,7 @@ int main(void) {
     printf("%-16s %-8s %-8s\n", "mode", "mask", "outRMS");
     struct { abox_mode m; const char* label; } modes[] = {
         { ABOX_MODE_KEYWORD_LISTENING, "KeywordListen"  },
-        { ABOX_MODE_CLOUD_STREAMING,   "CloudStreaming" },
+        { ABOX_MODE_CONVERSATION,   "Conversation" },
         { ABOX_MODE_BARGE_IN_MUTING,   "BargeInMuting"  },
     };
     for (unsigned k = 0; k < sizeof(modes) / sizeof(modes[0]); ++k) {

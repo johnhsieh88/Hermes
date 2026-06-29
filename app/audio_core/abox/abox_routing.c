@@ -8,7 +8,7 @@
 static const float kGain[4][ABOX_ELEM_COUNT] = {
     /* KEYWORD_LISTENING (0) */ {0,   0,   0,   0,   0,   0,   0},  /* idle/wake — all bypassed */
     /* BARGE_IN_MUTING   (1) */ {1,   1,   1,   1,   1,   1,   0},  /* TTS ducked → 0, keep capture */
-    /* CLOUD_STREAMING   (2) */ {1,   1,   1,   1,   1,   1,   1},  /* full duplex conversation */
+    /* CONVERSATION   (2) */ {1,   1,   1,   1,   1,   1,   1},  /* full duplex conversation */
     /* SYSTEM_RESET      (3) */ {0,   0,   0,   0,   0,   0,   0},  /* safe/muted during reset */
 };
 
