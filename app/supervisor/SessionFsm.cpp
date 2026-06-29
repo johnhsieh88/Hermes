@@ -33,9 +33,9 @@ const char* SessionStateName(SessionState s) {
 Supervisor::Supervisor() : MsgBus() {
     Add(_VoiceTrigger::evt::WAKE_CONFIRMED,  &Supervisor::onWake);
     Add(_AudioCore::evt::BARGE_IN,           &Supervisor::onBargeIn);
-    Add(_Cloud::evt::STT_ENDPOINT,           &Supervisor::onSttEndpoint);
-    Add(_Cloud::evt::TTS_CHUNK,              &Supervisor::onTtsChunk);
-    Add(_Cloud::evt::TTS_STREAM_END,         &Supervisor::onTtsStreamEnd);
+    Add(_Llm::evt::STT_ENDPOINT,           &Supervisor::onSttEndpoint);
+    Add(_Llm::evt::TTS_CHUNK,              &Supervisor::onTtsChunk);
+    Add(_Llm::evt::TTS_STREAM_END,         &Supervisor::onTtsStreamEnd);
     Add(_AudioCore::evt::PLAYBACK_DRAINED,   &Supervisor::onPlaybackDrained);
     Add(_AudioCore::evt::MODE_CHANGED,       &Supervisor::onModeChanged);
     Add(_CodecHw::evt::UNPLUGGED,            &Supervisor::onFault);
@@ -87,14 +87,14 @@ void Supervisor::enter(SessionState s) {
     SendMsg(ModuleId::SUPERVISOR, _Supervisor::evt::STATE_CHANGED, PRIO_NORMAL, &s, sizeof s);
     if (s == SS_FAULT) {                               // entry actions (§15.3)
         SendMsg(ModuleId::AUDIO_CORE,      _AudioCore::cmd::RESET_PIPELINE);
-        SendMsg(ModuleId::CLOUD_CONNECTOR, _Cloud::cmd::ABORT);
+        SendMsg(ModuleId::LLM_CONNECTOR, _Llm::cmd::ABORT);
         SendMsg(ModuleId::CODEC_HW,        _CodecHw::cmd::RESET);
     }
 }
 
 void Supervisor::startTurn() {
     SendMsg(ModuleId::VOICE_TRIGGER,   _VoiceTrigger::cmd::DISARM);     // no self-wake mid-turn
-    SendMsg(ModuleId::CLOUD_CONNECTOR, _Cloud::cmd::OPEN_STREAM);
+    SendMsg(ModuleId::LLM_CONNECTOR, _Llm::cmd::OPEN_STREAM);
     SendMsg(ModuleId::AUDIO_CORE,      _AudioCore::cmd::START_CAPTURE); // ABOX: pre-roll ring + live (§16)
     enter(SS_CAPTURE);
 }
@@ -109,13 +109,13 @@ void Supervisor::onWake(const CMsg* /*m*/) {
 // Supervisor only does the non-RT orchestration (kill cloud, transition).
 void Supervisor::onBargeIn(const CMsg* /*m*/) {
     if (state_ != SS_SPEAK) return;
-    SendMsg(ModuleId::CLOUD_CONNECTOR, _Cloud::cmd::ABORT, PRIO_URGENT);   // cancel in-flight TTS/LLM
+    SendMsg(ModuleId::LLM_CONNECTOR, _Llm::cmd::ABORT, PRIO_URGENT);   // cancel in-flight TTS/LLM
     enter(SS_BARGE_DUCK);                                                  // STOP_TTS/restart on MODE_CHANGED
 }
 
 void Supervisor::onSttEndpoint(const CMsg*) {
     if (state_ != SS_CAPTURE) return;
-    SendMsg(ModuleId::CLOUD_CONNECTOR, _Cloud::cmd::UTTERANCE_END);
+    SendMsg(ModuleId::LLM_CONNECTOR, _Llm::cmd::UTTERANCE_END);
     SendMsg(ModuleId::AUDIO_CORE,      _AudioCore::cmd::STOP_CAPTURE);
     enter(SS_THINK);
 }

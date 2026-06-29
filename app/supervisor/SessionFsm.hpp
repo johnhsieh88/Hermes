@@ -15,7 +15,7 @@ namespace hermes {
 enum SessionState {
     SS_INIT = 0,
     SS_IDLE,        // keyword listening (VTS armed)
-    SS_CAPTURE,     // streaming utterance to CLOUD_CONNECTOR
+    SS_CAPTURE,     // streaming utterance to LLM_CONNECTOR
     SS_THINK,       // awaiting first TTS chunk
     SS_SPEAK,       // TTS playback, barge-in armed
     SS_BARGE_DUCK,  // ducking → restart capture

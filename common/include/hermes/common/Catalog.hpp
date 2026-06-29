@@ -88,25 +88,25 @@ namespace evt {
   static constexpr uint16_t FRAME_DROP  = HM_EVT_FIRST(VIDEO_PROC) + 1;
 }}
 
-// ───────────── CLOUD_CONNECTOR (5) — on-target proxy ─────────────
-namespace _Cloud {
+// ───────────── LLM_CONNECTOR (5) — on-target STT/LLM/TTS, local-or-cloud LLM ─────────────
+namespace _Llm {
 namespace cmd {
-  static constexpr uint16_t OPEN_STREAM   = HM_CMD_FIRST(CLOUD_CONNECTOR) + 0;
-  static constexpr uint16_t CLOSE_STREAM  = HM_CMD_FIRST(CLOUD_CONNECTOR) + 1;
-  static constexpr uint16_t UTTERANCE_END = HM_CMD_FIRST(CLOUD_CONNECTOR) + 2;
-  static constexpr uint16_t ABORT         = HM_CMD_FIRST(CLOUD_CONNECTOR) + 3;  // barge-in cancels in-flight
+  static constexpr uint16_t OPEN_STREAM   = HM_CMD_FIRST(LLM_CONNECTOR) + 0;
+  static constexpr uint16_t CLOSE_STREAM  = HM_CMD_FIRST(LLM_CONNECTOR) + 1;
+  static constexpr uint16_t UTTERANCE_END = HM_CMD_FIRST(LLM_CONNECTOR) + 2;
+  static constexpr uint16_t ABORT         = HM_CMD_FIRST(LLM_CONNECTOR) + 3;  // barge-in cancels in-flight
 }
 namespace evt {
-  static constexpr uint16_t CONNECTED      = HM_EVT_FIRST(CLOUD_CONNECTOR) + 0;
-  static constexpr uint16_t DISCONNECTED   = HM_EVT_FIRST(CLOUD_CONNECTOR) + 1;
-  static constexpr uint16_t STT_PARTIAL    = HM_EVT_FIRST(CLOUD_CONNECTOR) + 2;
-  static constexpr uint16_t STT_FINAL      = HM_EVT_FIRST(CLOUD_CONNECTOR) + 3;
-  static constexpr uint16_t STT_ENDPOINT   = HM_EVT_FIRST(CLOUD_CONNECTOR) + 4;
-  static constexpr uint16_t STT_NO_SPEECH  = HM_EVT_FIRST(CLOUD_CONNECTOR) + 5;
-  static constexpr uint16_t LLM_BEGIN      = HM_EVT_FIRST(CLOUD_CONNECTOR) + 6;
-  static constexpr uint16_t TTS_CHUNK      = HM_EVT_FIRST(CLOUD_CONNECTOR) + 7;
-  static constexpr uint16_t TTS_STREAM_END = HM_EVT_FIRST(CLOUD_CONNECTOR) + 8;
-  static constexpr uint16_t CLOUD_ERROR    = HM_EVT_FIRST(CLOUD_CONNECTOR) + 9;
+  static constexpr uint16_t CONNECTED      = HM_EVT_FIRST(LLM_CONNECTOR) + 0;
+  static constexpr uint16_t DISCONNECTED   = HM_EVT_FIRST(LLM_CONNECTOR) + 1;
+  static constexpr uint16_t STT_PARTIAL    = HM_EVT_FIRST(LLM_CONNECTOR) + 2;
+  static constexpr uint16_t STT_FINAL      = HM_EVT_FIRST(LLM_CONNECTOR) + 3;
+  static constexpr uint16_t STT_ENDPOINT   = HM_EVT_FIRST(LLM_CONNECTOR) + 4;
+  static constexpr uint16_t STT_NO_SPEECH  = HM_EVT_FIRST(LLM_CONNECTOR) + 5;
+  static constexpr uint16_t LLM_BEGIN      = HM_EVT_FIRST(LLM_CONNECTOR) + 6;
+  static constexpr uint16_t TTS_CHUNK      = HM_EVT_FIRST(LLM_CONNECTOR) + 7;
+  static constexpr uint16_t TTS_STREAM_END = HM_EVT_FIRST(LLM_CONNECTOR) + 8;
+  static constexpr uint16_t LLM_ERROR      = HM_EVT_FIRST(LLM_CONNECTOR) + 9;   // local or cloud
 }}
 
 // ───────────── CODEC_HW (6) — hardware / buttons ─────────────

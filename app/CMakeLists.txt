@@ -13,7 +13,7 @@ endfunction()
 hermes_process(hermes_supervisor      supervisor/main.cpp supervisor/SessionFsm.cpp)
 hermes_process(hermes_voice_trigger   voice_trigger/main.cpp)
 hermes_process(hermes_video_proc      video_proc/main.cpp)
-hermes_process(hermes_cloud_connector cloud_connector/main.cpp)
+hermes_process(hermes_llm_connector llm_connector/main.cpp)
 hermes_process(hermes_codec_hw        codec_hw/main.cpp)
 
 # Dev/test web bridge (ModuleId 7): browser → control CMsg on the bus. Host-only test tool,

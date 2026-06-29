@@ -10,7 +10,7 @@ enum {
     AUDIO_CORE      = 2,  // ABOX — DSP RT island, PipeWire SPA node (SDS §14.4)
     VOICE_TRIGGER   = 3,  // VTS — always-on keyword detection, own process + own mic tap (SDS §16)
     VIDEO_PROC      = 4,  // A/V sync
-    CLOUD_CONNECTOR = 5,  // on-target proxy: PipeWire client <-> network (STT/LLM/TTS)
+    LLM_CONNECTOR   = 5,  // on-target inference router: STT/LLM/TTS, local-or-cloud LLM
     CODEC_HW        = 6,  // I2C codec + /dev/input buttons
     GUI_INTERFACE   = 7,  // dev/test web bridge: HTTP UI → control CMsg on the bus (not on device)
 };
