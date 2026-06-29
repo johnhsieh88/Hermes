@@ -13,6 +13,7 @@ enum {
     LLM_CONNECTOR   = 5,  // on-target inference router: STT/LLM/TTS, local-or-cloud LLM
     CODEC_HW        = 6,  // I2C codec + /dev/input buttons
     GUI_INTERFACE   = 7,  // dev/test web bridge: HTTP UI → control CMsg on the bus (not on device)
+    STORY_AGENT     = 8,  // multi-character audiobook orchestrator: scripts, position, casting, memory
 };
 } // namespace ModuleId
 } // namespace hermes

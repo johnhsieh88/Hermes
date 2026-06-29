@@ -95,6 +95,7 @@ namespace cmd {
   static constexpr uint16_t CLOSE_STREAM  = HM_CMD_FIRST(LLM_CONNECTOR) + 1;
   static constexpr uint16_t UTTERANCE_END = HM_CMD_FIRST(LLM_CONNECTOR) + 2;
   static constexpr uint16_t ABORT         = HM_CMD_FIRST(LLM_CONNECTOR) + 3;  // barge-in cancels in-flight
+  static constexpr uint16_t PLAY_SEGMENT  = HM_CMD_FIRST(LLM_CONNECTOR) + 4;  // story_agent → render seg idx (TTS)
 }
 namespace evt {
   static constexpr uint16_t CONNECTED      = HM_EVT_FIRST(LLM_CONNECTOR) + 0;
@@ -124,6 +125,18 @@ namespace evt {
   static constexpr uint16_t READY       = HM_EVT_FIRST(CODEC_HW) + 3;
   static constexpr uint16_t BUTTON_WAKE = HM_EVT_FIRST(CODEC_HW) + 4;  // PTT / action button
   static constexpr uint16_t BUTTON_MUTE = HM_EVT_FIRST(CODEC_HW) + 5;  // privacy mute
+}}
+
+// ───────────── STORY_AGENT (8) — multi-character audiobook orchestrator ─────────────
+namespace _Story {
+namespace cmd {                                              // imperatives TO story_agent (from supervisor)
+  static constexpr uint16_t START  = HM_CMD_FIRST(STORY_AGENT) + 0;  // begin reading the loaded script
+  static constexpr uint16_t PAUSE  = HM_CMD_FIRST(STORY_AGENT) + 1;
+  static constexpr uint16_t RESUME = HM_CMD_FIRST(STORY_AGENT) + 2;
+}
+namespace evt {                                              // notifications FROM story_agent
+  static constexpr uint16_t SEGMENT_STARTED = HM_EVT_FIRST(STORY_AGENT) + 0;
+  static constexpr uint16_t STORY_DONE      = HM_EVT_FIRST(STORY_AGENT) + 1;
 }}
 
 } // namespace hermes

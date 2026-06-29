@@ -16,5 +16,6 @@ AudioBox_DSP_Framework_SDS.md
 # Claude Code session data
 .claude/
 
-# Local-only architecture/design doc — kept on disk, out of the repo
+# Local-only architecture/design docs — kept on disk, out of the repo
 docs/abox_pipewire.md
+docs/story_agent_SDS.md
