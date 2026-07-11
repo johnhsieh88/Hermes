@@ -43,9 +43,12 @@ private:
     void startTurn();                    // common: open stream + start capture
 
     // transition actions (emit commands via Send)
+    void onReady(const CMsg*);           // SS_INIT        → SS_IDLE        (graph up)
     void onWake(const CMsg*);            // SS_IDLE        → SS_CAPTURE     (KEY PATH: KWD)
     void onBargeIn(const CMsg*);         // SS_SPEAK       → SS_BARGE_DUCK  (KEY PATH: barge-in)
     void onSttEndpoint(const CMsg*);     // SS_CAPTURE     → SS_THINK
+    void onSttNoSpeech(const CMsg*);     // SS_THINK       → SS_IDLE  (empty transcript)
+    void onCloudError(const CMsg*);      // SS_THINK       → SS_IDLE  (LLM/TTS fail)
     void onTtsChunk(const CMsg*);        // SS_THINK       → SS_SPEAK
     void onTtsStreamEnd(const CMsg*);    // mark end-pending
     void onPlaybackDrained(const CMsg*); // SS_SPEAK       → SS_IDLE

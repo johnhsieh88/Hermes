@@ -1,5 +1,6 @@
 #include "supervisor/SessionFsm.hpp"
 #include "hermes/common/Catalog.hpp"
+#include <cstdio>
 #include <pthread.h>
 #include <sched.h>
 
@@ -31,15 +32,18 @@ const char* SessionStateName(SessionState s) {
 }
 
 Supervisor::Supervisor() : MsgBus() {
+    Add(_CodecHw::evt::READY,                &Supervisor::onReady);
     Add(_VoiceTrigger::evt::WAKE_CONFIRMED,  &Supervisor::onWake);
     Add(_AudioCore::evt::BARGE_IN,           &Supervisor::onBargeIn);
-    Add(_Llm::evt::STT_ENDPOINT,           &Supervisor::onSttEndpoint);
-    Add(_Llm::evt::TTS_CHUNK,              &Supervisor::onTtsChunk);
-    Add(_Llm::evt::TTS_STREAM_END,         &Supervisor::onTtsStreamEnd);
+    Add(_Llm::evt::STT_ENDPOINT,             &Supervisor::onSttEndpoint);
+    Add(_Llm::evt::STT_NO_SPEECH,            &Supervisor::onSttNoSpeech);
+    Add(_Llm::evt::LLM_ERROR,               &Supervisor::onCloudError);
+    Add(_Llm::evt::TTS_CHUNK,               &Supervisor::onTtsChunk);
+    Add(_Llm::evt::TTS_STREAM_END,          &Supervisor::onTtsStreamEnd);
     Add(_AudioCore::evt::PLAYBACK_DRAINED,   &Supervisor::onPlaybackDrained);
     Add(_AudioCore::evt::MODE_CHANGED,       &Supervisor::onModeChanged);
     Add(_CodecHw::evt::UNPLUGGED,            &Supervisor::onFault);
-    // TODO: CANCEL_SESSION, SHUTDOWN, timeouts (TO_*), STT_NO_SPEECH → SS_IDLE.
+    // TODO: CANCEL_SESSION, SHUTDOWN, timeouts (TO_*).
 }
 
 // ── ① HIGH-prio intake: drain mq → FIFO, NO handling (SDS §15.7) ──
@@ -70,8 +74,9 @@ void Supervisor::PostSelfEvent(uint16_t id, TriggerPrio prio, const void* body, 
 }
 
 void Supervisor::Start() {
-    pool_.start(2);                                    // ③ worker pool (SCHED_OTHER)
-    fsmThread_ = std::thread([this] { FsmLoop(); });   // ② single FSM thread
+    pool_.start(2);
+    PostSelfEvent(_CodecHw::evt::READY, PRIO_NORMAL, nullptr, 0);  // SS_INIT → SS_IDLE
+    fsmThread_ = std::thread([this] { FsmLoop(); });
 }
 
 void Supervisor::Stop() {
@@ -83,6 +88,7 @@ void Supervisor::Stop() {
 
 // ── transition actions (run on the FSM thread) ──
 void Supervisor::enter(SessionState s) {
+    fprintf(stderr, "[SUP] state %s → %s\n", SessionStateName(state_), SessionStateName(s));
     state_ = s;
     SendMsg(ModuleId::SUPERVISOR, _Supervisor::evt::STATE_CHANGED, PRIO_NORMAL, &s, sizeof s);
     if (s == SS_FAULT) {                               // entry actions (§15.3)
@@ -93,14 +99,22 @@ void Supervisor::enter(SessionState s) {
 }
 
 void Supervisor::startTurn() {
-    SendMsg(ModuleId::VOICE_TRIGGER,   _VoiceTrigger::cmd::DISARM);     // no self-wake mid-turn
-    SendMsg(ModuleId::LLM_CONNECTOR, _Llm::cmd::OPEN_STREAM);
-    SendMsg(ModuleId::AUDIO_CORE,      _AudioCore::cmd::START_CAPTURE); // ABOX: pre-roll ring + live (§16)
+    fprintf(stderr, "[SUP] startTurn: DISARM→VTS, OPEN_STREAM→LLM, START_CAPTURE→AC\n");
+    SendMsg(ModuleId::VOICE_TRIGGER,   _VoiceTrigger::cmd::DISARM);
+    SendMsg(ModuleId::LLM_CONNECTOR,   _Llm::cmd::OPEN_STREAM);
+    SendMsg(ModuleId::AUDIO_CORE,      _AudioCore::cmd::START_CAPTURE);
     enter(SS_CAPTURE);
+}
+
+void Supervisor::onReady(const CMsg* /*m*/) {
+    if (state_ != SS_INIT) return;
+    fprintf(stderr, "[SUP] graph up — entering IDLE\n");
+    enter(SS_IDLE);
 }
 
 // KEY PATH: keyword wake (§16.5)
 void Supervisor::onWake(const CMsg* /*m*/) {
+    fprintf(stderr, "[SUP] WAKE_CONFIRMED received (state=%s)\n", SessionStateName(state_));
     if (state_ != SS_IDLE) return;
     startTurn();
 }
@@ -118,6 +132,20 @@ void Supervisor::onSttEndpoint(const CMsg*) {
     SendMsg(ModuleId::LLM_CONNECTOR, _Llm::cmd::UTTERANCE_END);
     SendMsg(ModuleId::AUDIO_CORE,      _AudioCore::cmd::STOP_CAPTURE);
     enter(SS_THINK);
+}
+
+void Supervisor::onSttNoSpeech(const CMsg*) {
+    if (state_ != SS_THINK) return;
+    fprintf(stderr, "[SUP] STT_NO_SPEECH — returning to IDLE\n");
+    SendMsg(ModuleId::VOICE_TRIGGER, _VoiceTrigger::cmd::ARM);
+    enter(SS_IDLE);
+}
+
+void Supervisor::onCloudError(const CMsg*) {
+    if (state_ != SS_THINK) return;
+    fprintf(stderr, "[SUP] LLM_ERROR — returning to IDLE\n");
+    SendMsg(ModuleId::VOICE_TRIGGER, _VoiceTrigger::cmd::ARM);
+    enter(SS_IDLE);
 }
 
 void Supervisor::onTtsChunk(const CMsg*) {

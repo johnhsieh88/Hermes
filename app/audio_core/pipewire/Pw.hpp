@@ -66,4 +66,31 @@ std::unique_ptr<PwFilterNode> create_pw_node(PwClient& client, const char* name,
                                              int chIn, int chOut, BlockFn fn, void* user,
                                              int sampleRate, int quantum);
 
+// ── PwStream: simple capture/playback stream (not a DSP filter node) ──────────
+//
+// CAPTURE: callback receives incoming audio (read the samples array).
+// PLAYBACK: callback must fill the samples array (nframes float32 values).
+// Called from the PipeWire RT thread — no blocking, no allocations.
+using StreamFn = void (*)(void* user, float* samples, uint32_t nframes, uint32_t rate);
+
+class PwStream {
+public:
+    enum Dir { CAPTURE, PLAYBACK };
+
+    PwStream(PwClient& client, const char* name, Dir dir, StreamFn fn, void* user,
+             const char* target = nullptr);
+    ~PwStream();
+    PwStream(PwStream&&) noexcept;
+    PwStream& operator=(PwStream&&) noexcept;
+    PwStream(const PwStream&) = delete;
+    PwStream& operator=(const PwStream&) = delete;
+
+    int  connect(uint32_t sampleRate);
+    void disconnect();
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
 } // namespace hermes::pw
