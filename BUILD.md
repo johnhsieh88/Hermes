@@ -86,9 +86,10 @@ libunistring). All 6 binaries link and produce clean aarch64 ELFs.
 
 **Deploy to QEMU target (SSH port 2222):**
 ```bash
-cat build-aarch64/app/hermes_supervisor | ssh -p 2222 root@127.0.0.1 \
-    'cat > /usr/bin/hermes_supervisor && chmod +x /usr/bin/hermes_supervisor'
-# repeat for hermes_cloud_connector, hermes_voice_trigger, etc.
+for bin in hermes_supervisor hermes_llm_connector hermes_voice_trigger; do
+  cat build-aarch64/app/$bin | ssh -p 2222 root@127.0.0.1 \
+    "cat > /usr/bin/$bin && chmod +x /usr/bin/$bin"
+done
 ```
 
 ---
@@ -99,36 +100,40 @@ Requires the `anime-ai-image-qemuarm64.rootfs.ext4` image running with SSH on po
 
 ```bash
 # On the QEMU target:
-export PIPEWIRE_RUNTIME_DIR=/run/pipewire XDG_RUNTIME_DIR=/run/pipewire
+. /etc/anime-ai/secrets.env          # loads GROQ_API_KEY
+export PIPEWIRE_RUNTIME_DIR=/run/pipewire
 # Stub vars needed on QEMU (virtio ALSA is suspended; sherpa-onnx/Piper too slow on emulation):
 export HERMES_TEST_UTTERANCE="hello aria"
 export HERMES_PW_CAP_TARGET="alsa_input.platform-snd_dummy.0.stereo-fallback"
 export HERMES_PW_PLAY_TARGET="alsa_output.platform-snd_dummy.0.stereo-fallback"
 
-hermes_supervisor  > /tmp/sup.log 2>&1 &
-hermes_cloud_connector > /tmp/cc.log 2>&1 &
+# Clear any stale POSIX queues from a previous run:
+rm -f /dev/mqueue/hermes.mod.*
+
+hermes_supervisor      > /tmp/sup.log 2>&1 &
+hermes_llm_connector   > /tmp/cc.log  2>&1 &
 sleep 3
 mq_probe   # injects WAKE_CONFIRMED → triggers the full FSM cycle
 ```
 
-Expected output in `/tmp/sup.log`:
+Actual output in `/tmp/sup.log` (verified 2026-07-11):
 ```
 [SUP] graph up — entering IDLE
 [SUP] state INIT → IDLE
 [SUP] WAKE_CONFIRMED received (state=IDLE)
-[SUP] startTurn: DISARM→VTS, OPEN_STREAM→CC, START_CAPTURE→AC
+[SUP] startTurn: DISARM→VTS, OPEN_STREAM→LLM, START_CAPTURE→AC
 [SUP] state IDLE → CAPTURE
 [SUP] state CAPTURE → THINK
 [SUP] state THINK → SPEAK
 [SUP] state SPEAK → IDLE
 ```
 
-Expected output in `/tmp/cc.log` (non-vad lines):
+Actual output in `/tmp/cc.log` (non-vad lines, verified 2026-07-11):
 ```
-[CC] pipeline: pcmBuf=324267 samples (20.3s), abort=0
+[CC] pipeline: pcmBuf=321536 samples (20.1s), abort=0
 [CC] STT stub: 'hello aria'
 [CC] transcript: 'hello aria'
-[CC] reply: *Konnichiwa* Hello there, friend! Nice day so far?
+[CC] reply: *Konnichiwa!* Welcome back to my corner of the desk. How may I brighten your day today?
 [CC] TTS stub: generating 0.5s silence for '...'
 ```
 

@@ -13,7 +13,7 @@ app/      the 6 independent processes:
             audio_core/      ABOX — DSP RT island as a PipeWire SPA node (SDS §14.4) + barge-in (§8)
             voice_trigger/   VTS — always-on keyword detection, own mic tap (SDS §16)
             video_proc/      A/V sync
-            cloud_connector/ on-target proxy: PipeWire client <-> network STT/LLM/TTS
+            llm_connector/   on-target proxy: PipeWire client <-> network STT/LLM/TTS
             codec_hw/        I2C codec + buttons
 test/     unit/ + integration/ (barge_in_e2e, kwd_wake_e2e are the primary KPIs, SDS §17.2)
 ```
@@ -34,7 +34,8 @@ ctest --test-dir build
 
 ### Phase 3 — Full Voice Loop (verified 2026-07-11)
 
-The complete dialog cycle runs end-to-end on QEMU aarch64 (cortexa57 sysroot cross-compile):
+The complete dialog cycle runs end-to-end on QEMU aarch64 (cortexa57 sysroot cross-compile,
+`hermes_llm_connector` built from `llm_connector/main.cpp`):
 
 ```
 SS_INIT → SS_IDLE → SS_CAPTURE → SS_THINK → SS_SPEAK → SS_IDLE
@@ -45,17 +46,25 @@ SS_INIT → SS_IDLE → SS_CAPTURE → SS_THINK → SS_SPEAK → SS_IDLE
 | Stage | Component | Result |
 |---|---|---|
 | WAKE_CONFIRMED → SS_IDLE | Supervisor FSM auto-transition at boot | ✓ |
-| OPEN_STREAM → capturing | CC VAD + PipeWire snd_dummy capture (1010+ callbacks/20s) | ✓ |
-| VAD silence timeout → STT_ENDPOINT | kMaxUtterMs=20s path | ✓ |
-| STT_NO_SPEECH → SS_IDLE | Supervisor recovery handler (new) | ✓ |
-| STT (stub) → Groq API → reply | Real HTTP call with live GROQ_API_KEY | ✓ |
-| TTS (stub) → TTS_CHUNK | Supervisor SS_THINK → SS_SPEAK | ✓ |
+| OPEN_STREAM → capturing | LLM_CONNECTOR VAD + PipeWire snd_dummy (1289+ callbacks/20s) | ✓ |
+| VAD silence timeout → STT_ENDPOINT | kMaxUtterMs=20s path (321k samples captured) | ✓ |
+| STT_NO_SPEECH → SS_IDLE | Supervisor recovery handler | ✓ |
+| STT (stub) → Groq API → reply | Real HTTP call, `llama-3.1-8b-instant`, live GROQ_API_KEY | ✓ |
+| TTS (stub) → TTS_CHUNK → SS_SPEAK | Supervisor SS_THINK → SS_SPEAK | ✓ |
 | PLAYBACK_DRAINED → SS_IDLE | Full loop completion | ✓ |
 
-**Actual Groq reply captured during test:**
+**Actual logs captured during test (2026-07-11):**
 ```
+[SUP] state INIT → IDLE
+[SUP] WAKE_CONFIRMED received (state=IDLE)
+[SUP] startTurn: DISARM→VTS, OPEN_STREAM→LLM, START_CAPTURE→AC
+[SUP] state IDLE → CAPTURE
+[CC] pipeline: pcmBuf=321536 samples (20.1s), abort=0
+[CC] STT stub: 'hello aria'
 [CC] transcript: 'hello aria'
-[CC] reply: *Konnichiwa* Hello there, friend! Nice day so far?
+[CC] reply: *Konnichiwa!* Welcome back to my corner of the desk. How may I brighten your day today?
+[CC] TTS stub: generating 0.5s silence for '...'
+[SUP] state CAPTURE → THINK
 [SUP] state THINK → SPEAK
 [SUP] state SPEAK → IDLE
 ```
