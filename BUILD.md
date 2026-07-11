@@ -68,6 +68,75 @@ substitute the RK3588 mapping (big = 4–7, LITTLE = 0–3).
 
 ---
 
+## 5. Cross-compile for cortexa57 (Yocto sysroot, no Docker)
+
+Used for the Ensoul anime-AI BSP (`anime-ai-image-qemuarm64`):
+
+```bash
+# Sysroot layout: ~/ensoul-yocto-bsp/build/tmp/sysroots-components/cortexa57/
+# Each package in its own subdir: pipewire/, curl/, sherpa-onnx/, glibc/, openssl/, ...
+cmake -S . -B build-aarch64 \
+    -DCMAKE_TOOLCHAIN_FILE=cmake/cortexa57.toolchain.cmake
+cmake --build build-aarch64
+```
+
+The toolchain file (`cmake/cortexa57.toolchain.cmake`) uses full `.so` paths to bypass
+sysroot linker search and adds `-rpath-link` for transitive deps (openssl, zlib, libidn2,
+libunistring). All 6 binaries link and produce clean aarch64 ELFs.
+
+**Deploy to QEMU target (SSH port 2222):**
+```bash
+cat build-aarch64/app/hermes_supervisor | ssh -p 2222 root@127.0.0.1 \
+    'cat > /usr/bin/hermes_supervisor && chmod +x /usr/bin/hermes_supervisor'
+# repeat for hermes_cloud_connector, hermes_voice_trigger, etc.
+```
+
+---
+
+## QEMU integration test (full voice loop)
+
+Requires the `anime-ai-image-qemuarm64.rootfs.ext4` image running with SSH on port 2222.
+
+```bash
+# On the QEMU target:
+export PIPEWIRE_RUNTIME_DIR=/run/pipewire XDG_RUNTIME_DIR=/run/pipewire
+# Stub vars needed on QEMU (virtio ALSA is suspended; sherpa-onnx/Piper too slow on emulation):
+export HERMES_TEST_UTTERANCE="hello aria"
+export HERMES_PW_CAP_TARGET="alsa_input.platform-snd_dummy.0.stereo-fallback"
+export HERMES_PW_PLAY_TARGET="alsa_output.platform-snd_dummy.0.stereo-fallback"
+
+hermes_supervisor  > /tmp/sup.log 2>&1 &
+hermes_cloud_connector > /tmp/cc.log 2>&1 &
+sleep 3
+mq_probe   # injects WAKE_CONFIRMED → triggers the full FSM cycle
+```
+
+Expected output in `/tmp/sup.log`:
+```
+[SUP] graph up — entering IDLE
+[SUP] state INIT → IDLE
+[SUP] WAKE_CONFIRMED received (state=IDLE)
+[SUP] startTurn: DISARM→VTS, OPEN_STREAM→CC, START_CAPTURE→AC
+[SUP] state IDLE → CAPTURE
+[SUP] state CAPTURE → THINK
+[SUP] state THINK → SPEAK
+[SUP] state SPEAK → IDLE
+```
+
+Expected output in `/tmp/cc.log` (non-vad lines):
+```
+[CC] pipeline: pcmBuf=324267 samples (20.3s), abort=0
+[CC] STT stub: 'hello aria'
+[CC] transcript: 'hello aria'
+[CC] reply: *Konnichiwa* Hello there, friend! Nice day so far?
+[CC] TTS stub: generating 0.5s silence for '...'
+```
+
+On real hardware: unset all three env vars. WirePlumber auto-connects streams to the codec;
+sherpa-onnx and Piper run against the real models under `/opt/ensoul/models/`.
+
+---
+
 ## Basic playback test on the RK3588 target
 
 `hermes_abox` is the audio engine: **one** PipeWire filter `hermes.abox` (2 mic-in, 1 mono-out)
