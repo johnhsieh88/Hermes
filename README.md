@@ -1,6 +1,6 @@
 # Hermes — Embedded LLM-Interactive AudioBox
 
-Two-plane architecture (design: local `AudioBox_DSP_Framework_SDS.md`):
+Two-plane architecture (full design: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — the AudioBox DSP Framework SDS is **Part II** of that doc):
 
 - **Data plane = PipeWire** (on target): mic, AEC reference, clean mono, TTS playback — zero-copy, clocked by the 5 ms quantum.
 - **Control plane = MsgBus** (POSIX mq per `ModuleId`): every command/event, async, priority-laned.
