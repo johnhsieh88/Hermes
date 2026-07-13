@@ -1,0 +1,3 @@
+<!-- Episodic session logs land here (one md per session), e.g. 2026-06-28T19-30.md.
+     Raw, timestamped turns. Pruned by the consolidation ("sleep") job after durable facts are
+     distilled into ../semantic/. On-device runtime data — gitignore the real logs. -->
