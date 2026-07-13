@@ -86,6 +86,16 @@ R"HTML(<!doctype html>
     <p class="hint">PTT-style session control → SUPERVISOR; barge-in ducks playback (URGENT lane).</p>
   </section>
 
+  <section class="card full">
+    <h2>Voice STT — real sherpa-onnx</h2>
+    <div class="row" style="align-items:center">
+      <button id="recBtn" class="primary" onclick="toggleRecord()">● Record</button>
+      <span id="recStatus" style="color:var(--mut);font-size:12px;padding:0 12px">idle — click Record, speak, click again to transcribe</span>
+    </div>
+    <div id="transcript" style="margin-top:10px;padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:7px;min-height:36px;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;color:#c9d1d9"></div>
+    <p class="hint">Browser mic → WAV → target sherpa-onnx (streaming zipformer 20M int8). QEMU: ~4s model load + 4.5× RT inference per clip.</p>
+  </section>
+
   <section class="card full" id="log">
     <h2>Event feed <span class="pill" id="count">0</span></h2>
     <div id="feed"></div>
@@ -143,6 +153,72 @@ mode(0);
 volLabel();
 setInterval(pollEvents, 700);
 pollEvents();
+
+// ── Voice STT ────────────────────────────────────────────────────────────────
+let _recActive=false, _recCtx, _recProc, _recStream, _recChunks=[];
+
+async function toggleRecord() {
+  if (!_recActive) {
+    try {
+      _recStream = await navigator.mediaDevices.getUserMedia({audio:{channelCount:1},video:false});
+      _recCtx = new (window.AudioContext||window.webkitAudioContext)();
+      const src = _recCtx.createMediaStreamSource(_recStream);
+      _recProc = _recCtx.createScriptProcessor(4096, 1, 1);
+      _recChunks = [];
+      _recProc.onaudioprocess = e => _recChunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+      src.connect(_recProc);
+      _recProc.connect(_recCtx.destination);
+      _recActive = true;
+      $('#recBtn').textContent = '■ Stop & Transcribe';
+      $('#recBtn').className = 'danger';
+      $('#recStatus').textContent = 'recording… click again to stop';
+      $('#transcript').textContent = '';
+    } catch(e) { flash('mic error: '+e, true); }
+  } else {
+    _recProc.disconnect();
+    _recStream.getTracks().forEach(t => t.stop());
+    _recActive = false;
+    const sr = _recCtx.sampleRate;
+    await _recCtx.close();
+    const wav = _buildWav(_recChunks, sr);
+    const secs = ((wav.byteLength - 44) / (sr * 2)).toFixed(1);
+    $('#recBtn').textContent = '● Record';
+    $('#recBtn').className = 'primary';
+    $('#recStatus').textContent = `uploading ${secs}s @ ${sr} Hz — waiting for sherpa-onnx…`;
+    $('#transcript').textContent = '(QEMU: ~4s model load + 4.5× RT inference — please wait)';
+    try {
+      const r = await fetch('/api/stt', {method:'POST', body:wav, headers:{'Content-Type':'audio/wav'}});
+      const j = await r.json();
+      $('#transcript').textContent = j.transcript || '(no speech detected)';
+      $('#recStatus').textContent = 'done';
+    } catch(e) {
+      $('#transcript').textContent = 'error: ' + e;
+      $('#recStatus').textContent = 'error';
+    }
+  }
+}
+
+function _buildWav(chunks, rate) {
+  let n = 0;
+  for (const c of chunks) n += c.length;
+  const ab = new ArrayBuffer(44 + n * 2);
+  const v = new DataView(ab);
+  const ws = (o, t) => { for (let i = 0; i < t.length; i++) v.setUint8(o + i, t.charCodeAt(i)); };
+  ws(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); ws(8, 'WAVE');
+  ws(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true);
+  v.setUint16(22, 1, true); v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true);
+  v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  ws(36, 'data'); v.setUint32(40, n * 2, true);
+  let o = 44;
+  for (const c of chunks) {
+    for (let i = 0; i < c.length; i++) {
+      const x = Math.max(-1, Math.min(1, c[i]));
+      v.setInt16(o, x < 0 ? x * 32768 : x * 32767, true);
+      o += 2;
+    }
+  }
+  return ab;
+}
 </script>
 </body>
 </html>

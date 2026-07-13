@@ -235,6 +235,37 @@ static std::string dispatch(GuiBridge& bus, const std::string& dir, const std::s
     return resp;
 }
 
+// ── Real STT via sherpa-onnx subprocess ──────────────────────────────────────
+static const char* kSttBase =
+    "/opt/ensoul/models/stt/sherpa-onnx-streaming-zipformer-en-20M-2023-02-17";
+
+static std::string run_stt_on_wav(const char* wav_path) {
+    char cmd[1024];
+    // sherpa-onnx writes the JSON result line to stderr; redirect 2>&1 >/dev/null
+    std::snprintf(cmd, sizeof(cmd),
+        "sherpa-onnx"
+        " --tokens=%s/tokens.txt"
+        " --encoder=%s/encoder-epoch-99-avg-1.int8.onnx"
+        " --decoder=%s/decoder-epoch-99-avg-1.int8.onnx"
+        " --joiner=%s/joiner-epoch-99-avg-1.int8.onnx"
+        " --model-type=zipformer --num-threads=4 %s 2>&1 >/dev/null",
+        kSttBase, kSttBase, kSttBase, kSttBase, wav_path);
+    FILE* fp = popen(cmd, "r");
+    if (!fp) return "";
+    std::string out;
+    char buf[512];
+    while (fgets(buf, sizeof(buf), fp)) out += buf;
+    pclose(fp);
+    // find: { "text": "hello world", ...}
+    const std::string kNeedle = "\"text\": \"";
+    size_t p = out.find(kNeedle);
+    if (p == std::string::npos) return "";
+    p += kNeedle.size();
+    size_t q = out.find('"', p);
+    if (q == std::string::npos) return "";
+    return out.substr(p, q - p);
+}
+
 // ── tiny HTTP plumbing ──
 static void send_resp(int fd, const char* status, const char* ctype, const std::string& body) {
     char hdr[256];
@@ -267,9 +298,9 @@ static int serve(GuiBridge& bus, const std::string& samplesDir, int port) {
         if (c < 0) continue;
         bus.reap();  // opportunistically collect a finished pw-play
 
-        // Read headers (+ body if Content-Length). Requests here are small.
+        // Read headers (+ body if Content-Length). STT posts can be several MB.
         std::string req;
-        char buf[2048];
+        char buf[16384];
         ssize_t r;
         size_t header_end = std::string::npos;
         while ((header_end = req.find("\r\n\r\n")) == std::string::npos &&
@@ -298,6 +329,24 @@ static int serve(GuiBridge& bus, const std::string& samplesDir, int port) {
             send_resp(c, "200 OK", "application/json", bus.eventsJson());
         } else if (method == "POST" && path == "/api/cmd") {
             send_resp(c, "200 OK", "application/json", dispatch(bus, samplesDir, body));
+        } else if (method == "POST" && path == "/api/stt") {
+            if (body.size() < 44 || body.size() > 10 * 1024 * 1024) {
+                send_resp(c, "400 Bad Request", "application/json",
+                          "{\"ok\":false,\"err\":\"body must be 44B–10MB WAV\"}");
+            } else {
+                const char* wav = "/tmp/hermes_stt_input.wav";
+                if (FILE* f = fopen(wav, "wb")) { fwrite(body.data(), 1, body.size(), f); fclose(f); }
+                char note[128];
+                std::snprintf(note, sizeof(note), "STT: running sherpa-onnx on %.1f s WAV…",
+                              static_cast<double>(body.size() - 44) / (2.0 * 16000));
+                bus.pushEvent(std::string("⇢ ") + note);
+                std::string transcript = run_stt_on_wav(wav);
+                if (transcript.empty()) transcript = "(no speech detected)";
+                bus.pushEvent("⇠ STT result: '" + transcript + "'");
+                std::string resp = "{\"ok\":true,\"transcript\":\""
+                                   + GuiBridge::jsonEscape(transcript) + "\"}";
+                send_resp(c, "200 OK", "application/json", resp);
+            }
         } else {
             send_resp(c, "404 Not Found", "text/plain", "not found");
         }
