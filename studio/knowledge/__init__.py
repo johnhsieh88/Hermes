@@ -41,12 +41,15 @@ def _scene_id(chapter: int, order_start: int) -> str:
 
 # ── Layer 3: scene segmentation (rules tier) ─────────────────────────────────
 
-def build_scenes(utterances, characters) -> list:
+def build_scenes(utterances: list, characters: list) -> list:
     """Segment the utterance stream into scenes; stamp scene_id back onto each utterance.
 
     Break rules (cheapest-first, honest): chapter boundary always; a narration line that
     moves the action to a NEW location ("She ran off into the market") starts a scene.
     """
+    # Known limit: single-token, case-sensitive alias matching — a character named a common
+    # capitalized word ("Hope", "Will") would over-match as participant/addressee. Accepted
+    # for the rules tier (needs_review gates it); the LLM/NER tiers disambiguate properly.
     alias_to_id = {}
     for c in characters:
         for a in set(c.aliases + [c.canonical_name]):
@@ -61,13 +64,16 @@ def build_scenes(utterances, characters) -> list:
             if m:
                 loc = m.group(1).lower()
         new_chapter = cur is None or u.chapter != cur.chapter
-        moved = loc is not None and cur is not None and loc != cur.location
+        # a move is only a move if the current scene already HAS a location — otherwise the
+        # first location cue merely names the scene we are already in
+        moved = (loc is not None and cur is not None
+                 and cur.location != "unknown" and loc != cur.location)
         if new_chapter or moved:
             if cur is not None:
                 scenes.append(cur)
             cur = Scene(scene_id=_scene_id(u.chapter, u.order), chapter=u.chapter,
                         order_start=u.order, order_end=u.order,
-                        location=loc or (cur.location if (cur and not new_chapter) else "unknown"))
+                        location=loc or "unknown")
         elif loc and cur.location == "unknown":
             cur.location = loc                       # first location named inside the scene
         cur.order_end = u.order
@@ -87,7 +93,7 @@ def build_scenes(utterances, characters) -> list:
     return scenes
 
 
-def summarize_scenes(scenes, utterances) -> None:
+def summarize_scenes(scenes: list, utterances: list) -> None:
     """Rules-tier summary: first narration sentence of the scene (verbatim, never invented)."""
     by_order = {u.order: u for u in utterances}
     for s in scenes:
@@ -100,7 +106,7 @@ def summarize_scenes(scenes, utterances) -> None:
 
 # ── addressee post-pass (rules tier) ─────────────────────────────────────────
 
-def assign_addressees(utterances, characters, scenes) -> None:
+def assign_addressees(utterances: list, characters: list, scenes: list) -> None:
     """Fill utterance.addressee_id for dialogue where the text/scene proves it.
 
     tier a — vocative: quote starts (or ends) with a registry name, "Genie, why…" → that char.
@@ -111,10 +117,17 @@ def assign_addressees(utterances, characters, scenes) -> None:
     for c in characters:
         for a in set(c.aliases + [c.canonical_name]):
             name_to_id[a] = c.id
+    # bucket speakers by scene RANGE (the scenes list is the source of truth) rather than
+    # relying on u.scene_id having been stamped by a prior build_scenes call
+    def scene_of(order: int):
+        for s in scenes:
+            if s.order_start <= order <= s.order_end:
+                return s.scene_id
+        return None
     speakers_by_scene = {}
     for u in utterances:
         if u.speaker_id not in (NARRATOR, UNKNOWN):
-            speakers_by_scene.setdefault(u.scene_id, set()).add(u.speaker_id)
+            speakers_by_scene.setdefault(scene_of(u.order), set()).add(u.speaker_id)
 
     voc_head = re.compile(r"^\s*([A-Z][a-z]+)\s*[,!]")
     voc_tail = re.compile(r",\s*([A-Z][a-z]+)\s*[.!?]?\s*$")
@@ -129,14 +142,15 @@ def assign_addressees(utterances, characters, scenes) -> None:
                     u.addressee_id = cid
                     break
         if u.addressee_id is None:
-            others = speakers_by_scene.get(u.scene_id, set()) - {u.speaker_id}
+            others = speakers_by_scene.get(scene_of(u.order), set()) - {u.speaker_id}
             if len(others) == 1:
                 u.addressee_id = next(iter(others))
 
 
 # ── Layer 2: dossiers ────────────────────────────────────────────────────────
 
-def build_dossiers(doc, characters, utterances, scenes, knowledge: str = "rules") -> dict:
+def build_dossiers(doc, characters: list, utterances: list, scenes: list,
+                   knowledge: str = "rules") -> dict:
     """{character_id: Dossier}. Rules tier always runs (it is the evidence base);
     the LLM tier overlays persona fields on top of it."""
     by_id = {c.id: c for c in characters}
@@ -146,12 +160,15 @@ def build_dossiers(doc, characters, utterances, scenes, knowledge: str = "rules"
         try:
             from studio.knowledge.llm import enrich_dossiers
             enrich_dossiers(doc, by_id, dossiers, utterances, scenes)
-        except Exception as e:  # honest degradation, never fail the build on an optional tier
+        except (RuntimeError, OSError) as e:
+            # narrow on purpose: "CLI missing / environment" degrades to rules; a genuine
+            # code defect (TypeError etc.) must surface, not masquerade as unavailability.
+            # Per-character reply failures are already isolated inside enrich_dossiers.
             print(f"[knowledge] LLM tier unavailable ({e}); dossiers stay at rules tier")
     return dossiers
 
 
-def _dossier_rules(c, characters, utterances, scenes) -> Dossier:
+def _dossier_rules(c, characters: list, utterances: list, scenes: list) -> Dossier:
     d = Dossier(character_id=c.id)
     names = {x.id: x.canonical_name for x in characters}
 

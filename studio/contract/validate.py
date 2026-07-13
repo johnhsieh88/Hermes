@@ -56,7 +56,9 @@ def validate_bundle(path) -> list:
                  f"scene {sid}: bad order range")
             need(s.get("order_start", 0) > prev_end,
                  f"scene {sid}: overlaps/regresses previous scene")
-            prev_end = s.get("order_end", prev_end)
+            # a scene with a missing/bad order_end is already an error above; don't let it
+            # silently weaken the overlap check for the scenes after it
+            prev_end = s["order_end"] if isinstance(s.get("order_end"), int) else prev_end + 10**9
             need(s.get("max_order") == s.get("order_end"),
                  f"scene {sid}: max_order != order_end (spoiler gate broken)")
             for p in s.get("participants", []):

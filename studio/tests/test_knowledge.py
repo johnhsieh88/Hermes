@@ -41,6 +41,15 @@ class TestScenes(unittest.TestCase):
         utts = [_u(0, "First chapter.", chapter=0), _u(1, "Second chapter.", chapter=1)]
         self.assertEqual(len(build_scenes(utts, _chars())), 2)
 
+    def test_location_named_mid_scene_does_not_split(self):
+        # regression: an unnamed scene must be NAMED by its first location cue, not split
+        utts = [_u(0, "Aladdin woke up."),
+                _u(1, "He went into the market."),
+                _u(2, "He bought bread.")]
+        scenes = build_scenes(utts, _chars())
+        self.assertEqual([(s.order_start, s.order_end, s.location) for s in scenes],
+                         [(0, 2, "market")])
+
     def test_summary_is_first_narration_sentence(self):
         utts = [_u(0, "Aladdin lived in the city of Agrabah. He was poor.")]
         scenes = build_scenes(utts, _chars())
@@ -98,6 +107,62 @@ class TestDossiers(unittest.TestCase):
         self.assertEqual(d.role, "")                      # rules tier never invents persona
         # spoiler gate: witnessed scene fact carries the scene's max_order
         self.assertEqual([(k.max_order) for k in d.knowledge], [2])
+
+
+class TestLlmTierHardening(unittest.TestCase):
+    def test_extract_json_survives_echoed_braces(self):
+        from studio.knowledge.llm import extract_json
+        reply = ("Based on the evidence {'Jafar': 'speaks with (3 exchange(s))'} here is "
+                 'the card:\n{"role": "hero", "traits": ["brave"]}')
+        self.assertEqual(extract_json(reply), {"role": "hero", "traits": ["brave"]})
+
+    def test_extract_json_raises_without_object(self):
+        from studio.knowledge.llm import extract_json
+        with self.assertRaises(RuntimeError):
+            extract_json("no json here { broken")
+
+    def test_apply_llm_card_shape_checks(self):
+        from studio.contract import Dossier
+        from studio.knowledge.llm import apply_llm_card
+        d = Dossier(character_id="ch_a", traits=["evidence"])
+        # model violates the schema: traits is a string, relationships is a list
+        apply_llm_card(d, {"role": "hero", "traits": "brave",
+                           "relationships": ["not", "a", "dict"], "knowledge": "nope"}, [])
+        self.assertEqual(d.role, "hero")
+        self.assertEqual(d.traits, ["evidence"])       # bad type skipped, evidence kept
+        self.assertEqual(d.relationships, {})
+        self.assertEqual(d.generated_by, "llm")
+        self.assertTrue(d.needs_review)
+
+    def test_one_bad_character_does_not_strip_the_rest(self):
+        import studio.knowledge.llm as llm_mod
+        from studio.contract import Character, Dossier
+
+        class _Doc:
+            chapters = []
+        chars = {"ch_a": Character(id="ch_a", canonical_name="A"),
+                 "ch_b": Character(id="ch_b", canonical_name="B")}
+        dossiers = {"ch_a": Dossier(character_id="ch_a"),
+                    "ch_b": Dossier(character_id="ch_b")}
+        calls = {"n": 0}
+
+        def fake_ask(prompt):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("boom")
+            return {"role": "fine"}
+        orig_ask, orig_cache = llm_mod._ask_claude, llm_mod._CACHE
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            llm_mod._ask_claude, llm_mod._CACHE = fake_ask, Path(tmp)
+            try:
+                llm_mod.enrich_dossiers(_Doc(), chars, dossiers, [], [])
+            finally:
+                llm_mod._ask_claude, llm_mod._CACHE = orig_ask, orig_cache
+        self.assertEqual(dossiers["ch_a"].generated_by, "rules")   # failed, kept evidence
+        self.assertEqual(dossiers["ch_b"].generated_by, "llm")     # unaffected
+        self.assertEqual(dossiers["ch_b"].role, "fine")
 
 
 class TestContractV02(unittest.TestCase):
