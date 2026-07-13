@@ -19,3 +19,10 @@ AudioBox_DSP_Framework_SDS.md
 # Local-only architecture/design docs — kept on disk, out of the repo
 docs/abox_pipewire.md
 docs/story_agent_SDS.md
+
+# Python (studio/)
+__pycache__/
+*.pyc
+
+# Copyrighted scanned-book fixture — local dev only, never commit
+LADYBIRD_Alladin-1.pdf

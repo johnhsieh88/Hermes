@@ -1,0 +1,18 @@
+# Studio runs with ZERO third-party deps in the rules tiers (stdlib only).
+# These enable the OPTIONAL higher-fidelity tiers — install only what you use.
+
+# Stage 1 — EPUB ingest
+ebooklib>=0.18
+beautifulsoup4>=4.12
+
+# Stage 1 — PDF / scanned ingest (extension point; not yet wired)
+# pdfplumber>=0.11
+# pdf2image>=1.17     # + system poppler
+# pytesseract>=0.3    # + system tesseract
+
+# Stage 2 — better character extraction & coreference  (--nlp spacy)
+# spacy>=3.7          # then: python -m spacy download en_core_web_trf  (or en_core_web_sm)
+# fastcoref>=2.1      # coreference (pulls torch)
+
+# Stage 3/4 — LLM attribution & emotion tiers (--attributor llm)
+#   any OpenAI-compatible / local endpoint; wire in studio/attribute + studio/emotion
