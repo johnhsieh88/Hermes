@@ -1,0 +1,28 @@
+{
+  "book_id": "the-lighthouse-keeper-624028a1",
+  "title": "The Lighthouse Keeper",
+  "author": "Unknown",
+  "contract_version": "0.2",
+  "studio_version": "0.2.0",
+  "engine_version": "unrendered",
+  "audio_rendered": false,
+  "counts": {
+    "chapters": 2,
+    "characters": 2,
+    "scenes": 2,
+    "utterances": 15,
+    "narration": 8,
+    "dialogue": 7,
+    "unknown_speaker": 0,
+    "below_tau": 1
+  },
+  "files": {
+    "casting.json": "890ccbb8bd00dbadfa7cc1c5ff916f83812ce9d9655f84b2661a2555c48d8447",
+    "chapters.json": "8466ac115b0892ab9362ac2bca06f937eb6f3dd939b1baee14f9ae0cf00e4a96",
+    "characters.okf/ch_be81d309.md": "bf06c17798b517bfe8f804efedacbebeb17892e04220e3abb61c1d9c44e236d1",
+    "characters.okf/ch_d48c6c58.md": "52743d540ee56c394b83e222cf018a13e01eb987d375cc2e8fc083455bd2c23c",
+    "scenes.json": "70d3e808035a77c73932e9d2e88c00c27bba4c69cd187527b0b1dbfaeedc0cf5",
+    "utterances.jsonl": "9c0745030e77eaca405963162d296c758ccbc22927245e0e42047538cd7f8457",
+    "voice_profiles.json": "bf5fb00b8ad3ec5f7218a1daad56a0752cd48c3f4c6768d9c182ef73d803e0e6"
+  }
+}

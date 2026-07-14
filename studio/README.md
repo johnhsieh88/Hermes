@@ -18,6 +18,58 @@ python3 -m unittest studio.tests.test_pipeline -v
 The rules tiers need **no third-party packages**. Optional higher-fidelity tiers (spaCy coref, LLM
 attribution, EPUB ingest) are in `requirements-optional.txt` and enabled by flags.
 
+### Expected output
+A successful run prints per-stage progress, a summary, and a review queue, then writes the bundle.
+For the bundled sample (`studio/samples/lighthouse.txt`):
+
+```text
+$ python3 -m studio.build_book studio/samples/lighthouse.txt --out out/books/lighthouse
+① ingest      studio/samples/lighthouse.txt
+   → 2 chapter(s), 8 paragraph(s): 'The Lighthouse Keeper'
+② registry    (nlp=rules)
+   • Elias        male    ×3
+   • Mara         female  ×3
+③ attribute   (attributor=rules)
+⑤ casting     (seeded, stable)
+⑧ knowledge   (knowledge=rules)
+   • sc_ac72368a orders 0–11 loc=unknown  participants=2
+   • sc_ce356d2f orders 12–14 loc=unknown  participants=2
+⑦ bundle      → out/books/lighthouse
+
+── summary ─────────────────────────────────────────────
+   utterances 15  (narration 8, dialogue 7)
+   characters 2   unknown-speaker 0   below τ=0.75 1
+   contract   VALID ✅
+
+── review queue (confidence < 0.75) — 1 item(s) ──
+   ch0 #9 [pronoun-gender/0.70] ch_d48c6c58 "You never change, old friend."
+
+$ python3 -m studio.contract.validate out/books/lighthouse
+VALID — bundle conforms to contract 0.2
+```
+
+**What "good" looks like:** `contract VALID ✅`, `unknown-speaker 0` (every quote attributed), and a
+short `review queue` (only genuinely ambiguous lines, below `--tau`). The run is **deterministic** —
+re-running yields byte-identical files (`git diff` on the bundle is empty).
+
+Resulting bundle (a committed reference copy lives at `out/books/lighthouse/`):
+```text
+out/books/lighthouse/
+  manifest.json          # contract_version 0.2, counts, per-file sha256
+  utterances.jsonl       # 15 rows — speaker_id, emotion, order, confidence, tier, scene_id
+  scenes.json            # 2 scenes with participants + spoiler gate
+  characters.okf/        # ch_be81d309.md (Elias), ch_d48c6c58.md (Mara)
+  casting.json · voice_profiles.json · chapters.json · SIGNATURE
+```
+One utterance row (from `utterances.jsonl`):
+```json
+{"id":"u_774e09d50dd2","chapter":0,"order":1,"text":"You shouldn't be up here alone,",
+ "speaker_id":"ch_be81d309","emotion":{"label":"neutral","intensity":0.0},
+ "confidence":0.97,"tier":"explicit","audio":null}
+```
+> This is exactly the shape Hermes ingests (`docs/end_to_end_pipeline.md` §5): `order` is the global
+> playback sequence, `audio:null` until Stage ⑥ renders a clip, and `audio_key(...)` will name it.
+
 ### Scanned-PDF books (OCR tier)
 ```bash
 brew install poppler tesseract        # external CLI tools; still zero Python deps

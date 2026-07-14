@@ -1,0 +1,29 @@
+{
+  "nx_narrator": {
+    "voice_profile_id": "nx_narrator",
+    "base_voice": "nx_narrator",
+    "engine": "xtts-v2",
+    "seed": 1577323223,
+    "pitch": 1.0,
+    "rate": 1.0,
+    "style": "narration"
+  },
+  "vp_be81d309": {
+    "voice_profile_id": "vp_be81d309",
+    "base_voice": "am_deep",
+    "engine": "xtts-v2",
+    "seed": 1490912488,
+    "pitch": 1.0,
+    "rate": 1.0,
+    "style": "male"
+  },
+  "vp_d48c6c58": {
+    "voice_profile_id": "vp_d48c6c58",
+    "base_voice": "af_warm",
+    "engine": "xtts-v2",
+    "seed": 2072457289,
+    "pitch": 1.0,
+    "rate": 1.0,
+    "style": "female"
+  }
+}

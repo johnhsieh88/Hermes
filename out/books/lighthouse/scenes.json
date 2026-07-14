@@ -1,0 +1,28 @@
+[
+  {
+    "scene_id": "sc_ac72368a",
+    "chapter": 0,
+    "order_start": 0,
+    "order_end": 11,
+    "location": "unknown",
+    "participants": [
+      "ch_d48c6c58",
+      "ch_be81d309"
+    ],
+    "summary": "The wind howled across the black rocks as Mara climbed the spiral stairs.",
+    "max_order": 11
+  },
+  {
+    "scene_id": "sc_ce356d2f",
+    "chapter": 1,
+    "order_start": 12,
+    "order_end": 14,
+    "location": "unknown",
+    "participants": [
+      "ch_be81d309",
+      "ch_d48c6c58"
+    ],
+    "summary": "By morning the storm had passed.",
+    "max_order": 14
+  }
+]

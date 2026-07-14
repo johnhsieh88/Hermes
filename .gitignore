@@ -2,7 +2,13 @@ build/
 build-native/
 build-rk3588/
 build-mac/
-out/
+# Build output is ignored, EXCEPT the published reference sample bundle (out/books/lighthouse),
+# which is committed as the canonical book-to-data output for provisioning/reference.
+# (out/books/aladdin stays ignored — copyrighted scanned fixture, see below.)
+out/*
+!out/books
+out/books/*
+!out/books/lighthouse
 out_loopback.log
 *.o
 *.a
