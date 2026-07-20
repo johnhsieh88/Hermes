@@ -11,9 +11,10 @@ add_library(hermes_abox_c STATIC
     nodes/node_common.c       # shared allocator + default vtable slots
     nodes/src_node.c          # one node per file (SDS §4)
     nodes/aec_node.c
-    nodes/beamform_node.c
-    nodes/ses_node.c)
-target_include_directories(hermes_abox_c PUBLIC ${CMAKE_SOURCE_DIR}/app)
+    nodes/beamform_node.c     # 2→2 channel-preserving (ARCH §13.2)
+    nodes/dmx_node.c)         # structural 2→1 downmix (replaces retired ses_node.c)
+target_include_directories(hermes_abox_c PUBLIC ${CMAKE_SOURCE_DIR}/app
+                                                ${CMAKE_SOURCE_DIR}/common/include)  # hermes/common/Log.h
 target_compile_features(hermes_abox_c PUBLIC c_std_11)
 
 # The worker pool runs one pinned pthread per big core.

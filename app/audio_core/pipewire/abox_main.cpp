@@ -1,6 +1,6 @@
 // hermes_abox — the AUDIO_CORE process (ModuleId 2). The live data plane is the C
 // engine: one PipeWire filter whose on_process drives the Core-Proportional Buffer Pool
-// (buffer_pipeline.c) over the C abox_node graph (src→aec→beamform→ses). This file is the
+// (buffer_pipeline.c) over the C abox_node graph (src→aec→beamform→dmx). This file is the
 // ONLY pw_* boundary (the bridge); the nodes never see PipeWire. The control module drives
 // the engine's EngineMode atomically from SET_MODE (approach B, no re-routing).
 #include "audio_core/abox/abox_nodes.h"
@@ -74,10 +74,10 @@ int main() {
     abox_node* src  = abox_node_create("src");
     abox_node* aec  = abox_node_create("aec");
     abox_node* beam = abox_node_create("beamform");
-    abox_node* ses  = abox_node_create("ses");
-    if (!src || !aec || !beam || !ses) return 2;
+    abox_node* dmx  = abox_node_create("dmx");
+    if (!src || !aec || !beam || !dmx) return 2;
     src->ops->prepare(src, &cfg);   aec->ops->prepare(aec, &cfg);
-    beam->ops->prepare(beam, &cfg); ses->ops->prepare(ses, &cfg);
+    beam->ops->prepare(beam, &cfg); dmx->ops->prepare(dmx, &cfg);
     abox_aec_set_ref(aec, &ref);
 
     // Ingress/egress as real vDMA NODES (capture→slot / slot→playback). The coordinator
@@ -91,7 +91,7 @@ int main() {
     hermes_pipeline_add_stage(&engine, src,  ABOX_ELEM_SRC);
     hermes_pipeline_add_stage(&engine, aec,  ABOX_ELEM_AEC);
     hermes_pipeline_add_stage(&engine, beam, ABOX_ELEM_BEAM);
-    hermes_pipeline_add_stage(&engine, ses,  ABOX_ELEM_SES);
+    hermes_pipeline_add_stage(&engine, dmx,  ABOX_ELEM_STRUCTURAL);  // always-on 2→1 (§13.2)
 
     // ── PipeWire: connect, control plane, then the one filter that runs the engine ──
     pw::PwClient client("hermes.abox");
@@ -120,7 +120,7 @@ int main() {
 
     hermes_pipeline_stop_async(&engine);
     abox_node_destroy(src);  abox_node_destroy(aec);
-    abox_node_destroy(beam); abox_node_destroy(ses);
+    abox_node_destroy(beam); abox_node_destroy(dmx);
     abox_node_destroy(vin);  abox_node_destroy(vout);
     return 0;
 }

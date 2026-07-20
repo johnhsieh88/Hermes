@@ -25,10 +25,15 @@ typedef enum {
     ABOX_MODE_SYSTEM_RESET      = 3
 } abox_mode;
 
-/* Controllable graph elements (routing-matrix columns). */
+/* Controllable graph elements (routing-matrix columns). ABOX_ELEM_STRUCTURAL marks a
+ * stage that is NOT a matrix column: the graph runs it in every mode (e.g. DMX — out_0
+ * is contractually mono regardless of mode, ARCHITECTURE §13.2). Column indices are
+ * never renumbered; SES is retired (2026-07-19) but its slot stays reserved. */
 typedef enum {
+    ABOX_ELEM_STRUCTURAL = -1,
     ABOX_ELEM_SRC = 0, ABOX_ELEM_AEC, ABOX_ELEM_REF, ABOX_ELEM_BEAM,
-    ABOX_ELEM_SES, ABOX_ELEM_CAPGATE, ABOX_ELEM_TTSOUT, ABOX_ELEM_COUNT
+    ABOX_ELEM_SES /* retired — column reserved, gain always 0 */,
+    ABOX_ELEM_CAPGATE, ABOX_ELEM_TTSOUT, ABOX_ELEM_COUNT
 } abox_elem;
 
 /* Hardware-agnostic planar frame view (the abox_frame). */
@@ -72,6 +77,8 @@ typedef struct abox_node {
     void*                state;   /* private per-instance DSP state */
     int                  in_ch;
     int                  out_ch;
+    const char*          name;    /* for trace/diagnostics; NULL ok (appended last so
+                                     aggregate initializers keep working) */
 } abox_node;
 
 /* A stage = a node + the routing column whose mask bit gates it. */

@@ -64,7 +64,11 @@ static const abox_node_ops SRC_OPS = {
     src_prepare, abox_node_default_configure, src_process, src_reset, abox_node_default_destroy
 };
 
-abox_node* abox_src_create(void) { return abox_node_alloc(&SRC_OPS, sizeof(src_state), 2, 2); }
+abox_node* abox_src_create(void) {
+    abox_node* n = abox_node_alloc(&SRC_OPS, sizeof(src_state), 2, 2);
+    if (n) n->name = "src";
+    return n;
+}
 
 void abox_src_set_ratio(abox_node* src, double ratio) {
     if (src && src->ops == &SRC_OPS && src->state) {

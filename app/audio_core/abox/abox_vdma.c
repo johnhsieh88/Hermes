@@ -78,8 +78,10 @@ abox_node *abox_vdma_create(abox_vdma_dir dir) {
   abox_node *n = abox_node_alloc(&VDMA_OPS, sizeof(vdma_state),
                                  dir == ABOX_VDMA_IN ? 0 : ABOX_MAX_CHANNELS,
                                  dir == ABOX_VDMA_IN ? ABOX_MAX_CHANNELS : 0);
-  if (n)
+  if (n) {
     ((vdma_state *)n->state)->dir = dir;
+    n->name = dir == ABOX_VDMA_IN ? "vdma_in" : "vdma_out";
+  }
   return n;
 }
 

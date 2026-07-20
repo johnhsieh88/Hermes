@@ -1,5 +1,5 @@
 /* harness_offline.c — the SDD §5 offline test harness, in C. Drives the DSP chain
- * (src→aec→beamform→ses) over SYNTHETIC planar frames with NO PipeWire daemon, using the
+ * (src→aec→beamform→dmx) over SYNTHETIC planar frames with NO PipeWire daemon, using the
  * in-process abox_graph as a deterministic engine. The same node vtables that run live
  * under PipeWire run here unchanged. Swap the synthetic generator for a .wav reader to
  * replay captures bit-exactly (ABOX_SIMULATION_MODE). */
@@ -49,10 +49,10 @@ int main(void) {
     abox_node* src  = abox_node_create("src");
     abox_node* aec  = abox_node_create("aec");
     abox_node* beam = abox_node_create("beamform");
-    abox_node* ses  = abox_node_create("ses");
-    if (!src || !aec || !beam || !ses) { fprintf(stderr, "node alloc failed\n"); return 1; }
+    abox_node* dmx  = abox_node_create("dmx");
+    if (!src || !aec || !beam || !dmx) { fprintf(stderr, "node alloc failed\n"); return 1; }
     src->ops->prepare(src, &cfg); aec->ops->prepare(aec, &cfg);
-    beam->ops->prepare(beam, &cfg); ses->ops->prepare(ses, &cfg);
+    beam->ops->prepare(beam, &cfg); dmx->ops->prepare(dmx, &cfg);
 
     abox_ref_manager ref;
     abox_ref_prepare(&ref, block);
@@ -64,9 +64,9 @@ int main(void) {
     abox_graph_add(&g, src,  ABOX_ELEM_SRC);
     abox_graph_add(&g, aec,  ABOX_ELEM_AEC);
     abox_graph_add(&g, beam, ABOX_ELEM_BEAM);
-    abox_graph_add(&g, ses,  ABOX_ELEM_SES);
+    abox_graph_add(&g, dmx,  ABOX_ELEM_STRUCTURAL);
 
-    printf("Hermes offline harness (C, no PipeWire) — chain src->aec->beam->ses, block=%d @ %d Hz\n",
+    printf("Hermes offline harness (C, no PipeWire) — chain src->aec->beam->dmx, block=%d @ %d Hz\n",
            block, sr);
     printf("%-16s %-8s %-8s\n", "mode", "mask", "outRMS");
     struct { abox_mode m; const char* label; } modes[] = {
@@ -81,6 +81,6 @@ int main(void) {
     }
 
     abox_node_destroy(src); abox_node_destroy(aec);
-    abox_node_destroy(beam); abox_node_destroy(ses);
+    abox_node_destroy(beam); abox_node_destroy(dmx);
     return 0;
 }

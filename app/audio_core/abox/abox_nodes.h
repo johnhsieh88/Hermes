@@ -12,7 +12,7 @@
 extern "C" {
 #endif
 
-/* Factory by type name ("src" | "aec" | "beamform" | "ses"). NULL on unknown / OOM. */
+/* Factory by type name ("src" | "aec" | "beamform" | "dmx"). NULL on unknown / OOM. */
 abox_node* abox_node_create(const char* type);
 void       abox_node_destroy(abox_node* n);
 

@@ -3,12 +3,14 @@
  * set of elements with gain > 0, derived here and read once per block on the RT path. */
 #include "audio_core/abox/abox_node.h"
 
-/* rows indexed by abox_mode; columns by abox_elem.
- *                              SRC  AEC  REF  BEAM SES  CAP  TTS */
+/* rows indexed by abox_mode; columns by abox_elem. The SES column is RETIRED
+ * (2026-07-19, ARCHITECTURE §13.2): the slot stays reserved (indices never renumber)
+ * with gain 0 in every mode. DMX is structural — it runs always and has no column.
+ *                              SRC  AEC  REF  BEAM SES† CAP  TTS */
 static const float kGain[4][ABOX_ELEM_COUNT] = {
     /* KEYWORD_LISTENING (0) */ {0,   0,   0,   0,   0,   0,   0},  /* idle/wake — all bypassed */
-    /* BARGE_IN_MUTING   (1) */ {1,   1,   1,   1,   1,   1,   0},  /* TTS ducked → 0, keep capture */
-    /* CONVERSATION   (2) */ {1,   1,   1,   1,   1,   1,   1},  /* full duplex conversation */
+    /* BARGE_IN_MUTING   (1) */ {1,   1,   1,   1,   0,   1,   0},  /* TTS ducked → 0, keep capture */
+    /* CONVERSATION   (2) */ {1,   1,   1,   1,   0,   1,   1},  /* full duplex conversation */
     /* SYSTEM_RESET      (3) */ {0,   0,   0,   0,   0,   0,   0},  /* safe/muted during reset */
 };
 

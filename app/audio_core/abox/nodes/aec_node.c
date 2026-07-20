@@ -42,7 +42,11 @@ static const abox_node_ops AEC_OPS = {
     abox_node_default_reset, abox_node_default_destroy
 };
 
-abox_node* abox_aec_create(void) { return abox_node_alloc(&AEC_OPS, sizeof(aec_state), 2, 2); }
+abox_node* abox_aec_create(void) {
+    abox_node* n = abox_node_alloc(&AEC_OPS, sizeof(aec_state), 2, 2);
+    if (n) n->name = "aec";
+    return n;
+}
 
 void abox_aec_set_ref(abox_node* aec, abox_ref_manager* ref) {
     if (aec && aec->ops == &AEC_OPS && aec->state)

@@ -20,9 +20,12 @@ static int feq(float a, float b) { return fabsf(a - b) < 1e-4f; }
 static void test_routing_mask(void) {
     assert(abox_active_mask(ABOX_MODE_KEYWORD_LISTENING) == 0u);
     assert(abox_active_mask(ABOX_MODE_SYSTEM_RESET) == 0u);
-    /* Conversation engages every element. */
-    for (int e = 0; e < ABOX_ELEM_COUNT; ++e)
+    /* Conversation engages every element EXCEPT the retired SES column (§13.2). */
+    for (int e = 0; e < ABOX_ELEM_COUNT; ++e) {
+        if (e == ABOX_ELEM_SES) continue;
         assert(abox_active_mask(ABOX_MODE_CONVERSATION) & abox_elem_bit((abox_elem)e));
+    }
+    assert(!(abox_active_mask(ABOX_MODE_CONVERSATION) & abox_elem_bit(ABOX_ELEM_SES)));
     /* BargeIn keeps AEC/capture, ducks TTS. */
     assert(abox_active_mask(ABOX_MODE_BARGE_IN_MUTING) & abox_elem_bit(ABOX_ELEM_AEC));
     assert(!(abox_active_mask(ABOX_MODE_BARGE_IN_MUTING) & abox_elem_bit(ABOX_ELEM_TTSOUT)));
@@ -181,7 +184,7 @@ static void test_src_node(void) {
 /* Basic playback use case: drive the EXACT live coordinator path (the same
  * hermes_pipeline_process_tick the PipeWire bridge calls) over the full node graph for
  * a run of blocks. Verifies output is produced, finite, bounded, no drops — i.e. audio
- * flows mic→src→aec→beam→ses→out through the buffer pool. */
+ * flows mic→src→aec→beam→dmx→out through the buffer pool. */
 static void test_playback_pipeline(void) {
     hermes_buffered_pipeline e;
     hermes_pipeline_init(&e, 48000);
@@ -192,14 +195,14 @@ static void test_playback_pipeline(void) {
     abox_node* src  = abox_node_create("src");
     abox_node* aec  = abox_node_create("aec");
     abox_node* beam = abox_node_create("beamform");
-    abox_node* ses  = abox_node_create("ses");
-    assert(src && aec && beam && ses);
+    abox_node* dmx  = abox_node_create("dmx");
+    assert(src && aec && beam && dmx);
     src->ops->prepare(src, &cfg);  aec->ops->prepare(aec, &cfg);
-    beam->ops->prepare(beam, &cfg); ses->ops->prepare(ses, &cfg);
+    beam->ops->prepare(beam, &cfg); dmx->ops->prepare(dmx, &cfg);
     hermes_pipeline_add_stage(&e, src,  ABOX_ELEM_SRC);
     hermes_pipeline_add_stage(&e, aec,  ABOX_ELEM_AEC);
     hermes_pipeline_add_stage(&e, beam, ABOX_ELEM_BEAM);
-    hermes_pipeline_add_stage(&e, ses,  ABOX_ELEM_SES);
+    hermes_pipeline_add_stage(&e, dmx,  ABOX_ELEM_STRUCTURAL);
     hermes_pipeline_set_mode(&e, ABOX_MODE_CONVERSATION);   /* full duplex → all stages on */
 
     enum { BLK = 240 };
@@ -225,7 +228,7 @@ static void test_playback_pipeline(void) {
     assert(atomic_load(&e.drops) == 0);
 
     abox_node_destroy(src);  abox_node_destroy(aec);
-    abox_node_destroy(beam); abox_node_destroy(ses);
+    abox_node_destroy(beam); abox_node_destroy(dmx);
 }
 
 /* Async pipeline: with per-slot worker threads, the SAME live tick produces real output
@@ -240,14 +243,14 @@ static void test_async_pipeline(void) {
     abox_node* src  = abox_node_create("src");
     abox_node* aec  = abox_node_create("aec");
     abox_node* beam = abox_node_create("beamform");
-    abox_node* ses  = abox_node_create("ses");
-    assert(src && aec && beam && ses);
+    abox_node* dmx  = abox_node_create("dmx");
+    assert(src && aec && beam && dmx);
     src->ops->prepare(src, &cfg);  aec->ops->prepare(aec, &cfg);
-    beam->ops->prepare(beam, &cfg); ses->ops->prepare(ses, &cfg);
+    beam->ops->prepare(beam, &cfg); dmx->ops->prepare(dmx, &cfg);
     hermes_pipeline_add_stage(&e, src,  ABOX_ELEM_SRC);
     hermes_pipeline_add_stage(&e, aec,  ABOX_ELEM_AEC);
     hermes_pipeline_add_stage(&e, beam, ABOX_ELEM_BEAM);
-    hermes_pipeline_add_stage(&e, ses,  ABOX_ELEM_SES);
+    hermes_pipeline_add_stage(&e, dmx,  ABOX_ELEM_STRUCTURAL);
     hermes_pipeline_set_mode(&e, ABOX_MODE_CONVERSATION);
 
     hermes_pipeline_start_async(&e, /*first_core=*/-1);   /* no pinning under test */
@@ -270,14 +273,14 @@ static void test_async_pipeline(void) {
     assert(saw_output);                          /* the async pipeline produced real output */
     assert(atomic_load(&e.processed) > 0);
     abox_node_destroy(src);  abox_node_destroy(aec);
-    abox_node_destroy(beam); abox_node_destroy(ses);
+    abox_node_destroy(beam); abox_node_destroy(dmx);
 }
 
 /* Loopback / bypass (BASIC TC, mirrors scripts/run_loopback.sh at unit level). With no DSP
- * kernels yet every node is a passthrough, so the whole src→aec→beam→ses chain is an identity
+ * kernels yet every node is a passthrough, so the whole src→aec→beam→dmx chain is an identity
  * on chan[0]. Feeds a distinctive tone on the L mic and a DIFFERENT DC level on the R mic; once
  * the buffer pool fills, the mono output must equal the L input BIT-EXACT — proving the full
- * transport+graph path is lossless AND that beamform bypasses chan[0] (an average would fold in
+ * transport+graph path is lossless AND that DMX selects chan[0] (a downmix average would fold in
  * the R mic and break equality). This is the no-PipeWire twin of the on-target loopback. */
 static void test_loopback_bypass(void) {
     hermes_buffered_pipeline e;
@@ -288,14 +291,14 @@ static void test_loopback_bypass(void) {
     abox_node* src  = abox_node_create("src");
     abox_node* aec  = abox_node_create("aec");
     abox_node* beam = abox_node_create("beamform");
-    abox_node* ses  = abox_node_create("ses");
-    assert(src && aec && beam && ses);
+    abox_node* dmx  = abox_node_create("dmx");
+    assert(src && aec && beam && dmx);
     src->ops->prepare(src, &cfg);  aec->ops->prepare(aec, &cfg);
-    beam->ops->prepare(beam, &cfg); ses->ops->prepare(ses, &cfg);
+    beam->ops->prepare(beam, &cfg); dmx->ops->prepare(dmx, &cfg);
     hermes_pipeline_add_stage(&e, src,  ABOX_ELEM_SRC);
     hermes_pipeline_add_stage(&e, aec,  ABOX_ELEM_AEC);
     hermes_pipeline_add_stage(&e, beam, ABOX_ELEM_BEAM);
-    hermes_pipeline_add_stage(&e, ses,  ABOX_ELEM_SES);
+    hermes_pipeline_add_stage(&e, dmx,  ABOX_ELEM_STRUCTURAL);
     hermes_pipeline_set_mode(&e, ABOX_MODE_CONVERSATION);   /* every stage active */
 
     enum { BLK = 240 };
@@ -321,7 +324,7 @@ static void test_loopback_bypass(void) {
     assert(atomic_load(&e.drops) == 0);
 
     abox_node_destroy(src);  abox_node_destroy(aec);
-    abox_node_destroy(beam); abox_node_destroy(ses);
+    abox_node_destroy(beam); abox_node_destroy(dmx);
 }
 
 /* Virtual DMA: the xfer primitive copies planar channels + counts transfers; the node
