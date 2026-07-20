@@ -3,7 +3,12 @@
 **Product:** Interactive Multi-Character Audiobook on the Hermes Embedded AudioBox
 **System class:** Embedded real-time multimedia system (heterogeneous multicore SoC)
 **Target:** Rockchip RK3588 · aarch64 / ARMv8.2-A · PipeWire on PREEMPT_RT Linux
-**Document status:** Draft v0.2 · 2026-06-29 · *living document — update alongside the code*
+**Document status:** Draft v0.3 · 2026-07-19 · *living document — update alongside the code*
+*(v0.3: SES removed from the cascade; BEAM made channel-preserving 2→2; DMX 2→1 added as the
+final structural stage; `out_0` contract fixed at mono/f32/48 kHz — see §13.2 design-change notes.
+2026-07-20: CAPGATE structural gate built (`START/STOP_CAPTURE` live); UC-12 capture→STT→cloud
+path code-complete incl. preroll backfill; §13.2.1 Node Reference, §16.7 data flow, §16.8 UC-12
+added; `Log.h` logging standard; `run_voice.sh` launcher.)*
 **Audience:** Engineering, product, security/privacy review
 
 > This is the **single authoritative architecture & design document** for Hermes. It spans
@@ -46,7 +51,7 @@
 13. Audio Data Plane (ABOX + PipeWire)
 14. State Machines
 15. High-Level Call Sequences
-16. Low-Level Detailed Sequences (incl. Playback Use Cases §16.5–16.6)
+16. Low-Level Detailed Sequences (Playback §16.5–16.6 · End-to-End Data Flow §16.7 · UC-12 Audio Capture §16.8)
 17. Knowledge & Memory Subsystem
 18. Cross-Cutting Concerns
 19. Deployment & Build
@@ -160,6 +165,7 @@ call sequences, state machines, safety/privacy, deployment.
 | **UC-9** | **Fault recovery** — codec unplug / pipeline error → reset & recover | ✅ FSM `SS_FAULT` |
 | **UC-10** | **Privacy mute** — hardware mute button cuts capture | ⛔ stub (`BUTTON_MUTE` defined) |
 | **UC-11** | **Dev/test control** — web GUI drives modes/volume/barge-in onto the bus | ✅ `gui_interface` |
+| **UC-12** | **Audio Capture** — mic → abox clean `out_0` → on-device STT → cloud LLM → spoken answer (§16.8) | ⚠ capture+resident-STT built (v0.3 slice); answer playback still bypasses abox |
 
 ---
 
@@ -224,7 +230,7 @@ addressed by **ModuleId**. Audio is the only data-plane process.
 ```
 ══════════ DATA PLANE (PipeWire, zero-copy, RT, A76 cores) ══════════
   mic ─in_0/in_1─► [hermes.abox filter] ─out_0─► speaker
-                    SRC → AEC → BEAM → SES   (mode-gated cascade, 240-frame quantum)
+                    SRC → AEC → BEAM → DMX → CAPGATE   (mode-gated cascade, 240-frame quantum)
                     vDMA ingress → buffer-pool slot[i] → worker[i]@cpu(5+i) → vDMA egress
 
 ══════════ CONTROL PLANE (POSIX-mq MsgBus, async, A55 cores) ══════════
@@ -255,9 +261,9 @@ process.
 |------------------|:---:|:---:|----------------|:---:|
 | `hermes_supervisor` | 1 | C++ | Session FSM, mode policy, fault recovery, consolidation trigger | ✅ FSM |
 | `hermes_abox` | 2 | C++/C | DSP RT island, PipeWire node, ducking, soft-mute | ✅ engine / ⚠ DSP kernels stubbed |
-| `hermes_voice_trigger` | 3 | C++ | Always-on wake word, own mic tap, pre-roll | ⛔ stub |
+| `hermes_voice_trigger` | 3 | C++ | Always-on wake word (sherpa-onnx KWS), own mic tap, pre-roll writer | ✅ KWD |
 | `hermes_video_proc` | 4 | C++ | A/V sync (future) | ⛔ stub |
-| `hermes_llm_connector` | 5 | C++ | STT · LLM local/cloud routing · TTS · guardrail gate | ⚠ skeleton |
+| `hermes_llm_connector` | 5 | C++ | resident streaming STT (out_0 feed) · Groq LLM · Piper TTS · guardrail gate ⛔ | ⚠ voice loop real; `PLAY_SEGMENT` ⛔ |
 | `hermes_codec_hw` | 6 | C++ | I2C codec + `/dev/input` buttons | ⛔ stub |
 | `hermes_gui_interface` | 7 | C++ | Dev/test web bridge (HTTP → control CMsg); not on device | ✅ test tool |
 | `hermes_story_agent` | 8 | C++ | Audiobook orchestration + Memory facade | ⚠ basic |
@@ -266,7 +272,9 @@ process.
 | `services/memory/server.py` | sidecar | Py | mem0 HTTP recall/extraction (localhost :7070) | ✅ |
 
 Launch (no init/systemd yet — script-driven): `scripts/run_gui.sh` (PipeWire + abox + gui),
-`scripts/run_target.sh` (on-device loopback), `scripts/run_loopback.sh` (Mac null-sink loopback),
+`scripts/run_target.sh` (on-device loopback), `scripts/run_voice.sh` (full UC-12 voice path:
+abox+links+FSM+VTS+connector, validation checklist in its header), `scripts/run_loopback.sh`
+(Mac null-sink loopback),
 `scripts/build.sh` (docker cross/native/run/test).
 
 ---
@@ -469,8 +477,33 @@ high 128 = events FROM it.
 Static linear cascade, executed in-place per block (zero-copy):
 
 ```
-SRC (2→2) → AEC (2→2) → BEAM (2→1) → SES (1→1)
+SRC (2→2) → AEC (2→2) → BEAM (2→2) → DMX (2→1) → CAPGATE (1→1)
 ```
+
+Every processing node is **channel-preserving** (2→2); the channel collapse happens only in the
+final structural `DMX` stage. This keeps one uniform frame format through the whole cascade and
+lets BEAM expose a GSC-style pair — `chan[0]` = beam (voice), `chan[1]` = blocking-matrix noise
+reference — for a future post-filter, with `DMX` selecting/downmixing `chan[0]` into `out_0`.
+
+**`out_0` contract: mono · f32 · 48 kHz — nothing else.** Consumers (STT / VAD / KWD) take it
+natively; any model-rate conversion (e.g. the recognizer's 16 kHz feature frontend, or a PW
+stream-adapter resample) is the **consumer's** concern. abox carries no rate conversion beyond
+the head-of-cascade SRC drift trim.
+
+> **Design change — `out_0` delivery & consumer-edge buffering (2026-07-19).** `out_0` reaches
+> speech consumers over a **PipeWire link created by session policy**: the consumer's capture
+> stream carries `node.target = hermes.abox` (`PW_KEY_NODE_TARGET`, `Pw.cpp:187`; env hook
+> `HERMES_PW_CAP_TARGET` in `llm_connector`) and WirePlumber links `out_0 → <stream>` —
+> delivery is same-cycle, zero-copy SHM. **Rate decoupling is the consumer's job**, one
+> `AudioRing<N>` (`common/include/hermes/common/AudioRing.hpp` — lock-free SPSC, drop-new +
+> overrun counter) per consumer: the RT stream callback only pushes; a worker thread pops
+> model-sized chunks (STT ~100 ms, VAD ~32 ms). **abox never buffers for consumers and knows
+> no chunk sizes** — buffering inside the engine would leak consumer pacing into the RT island
+> and impose one consumer's latency on all. *Designed alternative (not built): a **TAP node** —
+> an `abox_node` after DMX writing a PrerollRing-style SHM ring (`/hermes.out0`: f32,
+> `writePos` + `epoch`, overwrite-oldest, position-addressed) — N readers share one ring with
+> private read positions and consumers need no PipeWire; adopt when speech consumers multiply
+> (ear-process migration).*
 
 Node vtable (`abox_node.h:61`): `prepare / configure / process / reset / destroy`; `process()`
 mutates one shared `abox_frame` in place. Graph storage: `abox_stage stages[ABOX_MAX_STAGES=8]`.
@@ -480,11 +513,112 @@ Limits: `ABOX_MAX_CHANNELS=2`, `ABOX_MAX_BLOCK=512`.
 |------|------|:---:|------|
 | SRC | `nodes/src_node.c` | ✅ real | fractional resampler, drift, ratio clamp 0.5–2.0; identity at 1.0 |
 | AEC | `nodes/aec_node.c` | ⚠ stub | pulls aligned reference, ramps blend (10 ms); PBFDAF kernel TODO — bypass today |
-| BEAM | `nodes/beamform_node.c` | ⚠ stub | 2→1, keeps chan[0]; MVDR/GSC TODO |
-| SES | `nodes/ses_node.c` | ⚠ stub | full bypass (out==in); spectral suppression TODO |
+| BEAM | `nodes/beamform_node.c` | ⚠ stub | **2→2 (channel-preserving)**; MVDR/GSC TODO — target: chan[0]=beam, chan[1]=noise ref |
+| DMX | `nodes/dmx_node.c` | ✅ | **2→1 structural downmix** — selects chan[0] → `out_0`; always on (`ABOX_ELEM_STRUCTURAL`, not mode-gated) |
 
 `abox_selftest` ABOX-11 asserts **bit-exact `out0 == in0`** end-to-end (proves transport+graph are
 lossless and BEAM passes chan[0], not an average). When real kernels land, this assertion changes.
+
+> **Design change — SES removed (2026-07-19).** The cascade formerly ended in an `SES (1→1)`
+> spectral-suppression stage (`nodes/ses_node.c`, a full-bypass stub). It is removed from the
+> design: (a) no kernel was ever implemented; (b) its intended benefit — residual-echo/noise
+> "polish" — serves human listeners and cloud ASR, while the on-device consumers of `out_0`
+> (KWD / VAD / STT) are better served by *unpolished* post-BEAM audio: spectral suppression in
+> front of models trained on raw speech typically degrades them; (c) dropping it simplifies the
+> cascade and the routing matrix. If a polish stage returns, it will be an **optional element on
+> a playback-/cloud-bound tap**, not in the capture spine. **Code follow-up done (2026-07-20):**
+> `nodes/ses_node.c` deleted; stage wiring dropped from `abox_main.cpp`/harness/selftest; the
+> `ABOX_ELEM_SES` column retired in `kGain` (slot reserved — element indices never renumber;
+> Conversation mask is now `0x6F`); selftest updated and passing. Parts II/III retain SES in
+> their historical text.
+
+> **Design change — BEAM made channel-preserving; DMX added (2026-07-19).** BEAM no longer
+> mutates the channel count (was 2→1 by `channels = 1`); it is now specified 2→2 so the frame
+> format is uniform across all processing nodes and the GSC noise-reference channel has a home.
+> The 2→1 collapse moves to a new final **DMX** stage (structural, always-on, not a matrix
+> column). *(Not "SRC" — SRC is the sample-rate/drift node at the head of the cascade; a
+> channel downmix is a different operation and keeps a distinct name.)* **Code follow-up done
+> (2026-07-20):** `beamform_node.c` is now a pure 2→2 passthrough stub; `nodes/dmx_node.c`
+> added and wired (`ABOX_ELEM_STRUCTURAL = -1` — the graph tick runs structural stages in
+> every mode); `abox_selftest` all-pass, ABOX-11 unchanged in effect (`out_0 == in_0`).
+
+#### 13.2.1 Node Reference — every element, its processing, and its I/O format
+
+Shared frame contract for all nodes: **planar** `abox_frame` — `chan[c]` per-channel f32
+pointers, `frames = 240`, `rate = 48 000`, `sample_pos` in the graph clock, processed
+**in-place** (untouched frame ⇒ bit-exact bypass); `malloc` at `prepare()` only, never in
+`process()`.
+
+| Node / element | In → Out | Gating | File | Status |
+|---|---|---|---|:---:|
+| vDMA-IN | PW port buffers (2×mono f32) → slot frame 2 ch | structural (pipeline plumbing) | `abox_vdma.c` | ✅ |
+| SRC | 2 ch → 2 ch · 48 k → 48 k (drift trim) | `ABOX_ELEM_SRC` | `nodes/src_node.c` | ✅ kernel / ⚠ no drift input |
+| AEC | 2 ch → 2 ch | `ABOX_ELEM_AEC` (+ consumes REF) | `nodes/aec_node.c` | ⚠ bypass stub |
+| REF | *(service, not a node)* far-end ring → AEC | `ABOX_ELEM_REF` | `reference_manager.c` | ✅ mech / ⛔ producer |
+| BEAM | 2 ch → 2 ch (channel-preserving) | `ABOX_ELEM_BEAM` | `nodes/beamform_node.c` | ⚠ bypass stub |
+| DMX | 2 ch → 1 ch (select chan[0]) | **structural — every mode** | `nodes/dmx_node.c` | ✅ |
+| CAPGATE | 1 ch → 1 ch (capture on/off) | **structural** ×matrix gain | `nodes/capgate_node.c` | ✅ |
+| TTSOUT | playback gain / duck point | `ABOX_ELEM_TTSOUT` | *(no node file)* | ⛔ |
+| vDMA-OUT | slot chan[0] → `out_0` port buffer, × master gain | structural | `abox_vdma.c` (`bp_egress`) | ✅ |
+
+**vDMA-IN — ingress (structural).** Claims the cycle's samples out of PipeWire-owned port
+buffers into an engine-owned pool slot (bounded memcpy, 2×960 B) and stamps
+`frames/rate/sample_pos`. Exists so the borrowed graph buffer can be returned immediately
+while a worker still owns the slot — the seam that makes the async pool and the deadline
+firewall possible (§13.4).
+
+**SRC — asynchronous sample-rate converter.** Per-channel fractional linear-interp resampler
+pinning the codec-crystal clock onto the graph clock: ratio ≈ 1.0 ± ppm (clamp 0.5–2.0),
+phase carried across blocks, exact-identity fast path at ratio 1.0. *Must precede AEC* —
+uncorrected drift slides the echo under the adaptive filter and prevents convergence. Ratio
+input (`abox_src_set_ratio`, from the drift-PI estimator) is ⛔ unwired ⇒ runs at 1.0 today.
+Not a channel or nominal-rate converter — 48 k in, 48 k out, always.
+
+**AEC — acoustic echo canceller.** Design: PBFDAF (partitioned-block frequency-domain,
+~190 ms tail) per channel, subtracting the time-aligned far-end (REF) from each mic; blend
+ramped ~10 ms on mode entry; adaptation freezable (`FREEZE_ADAPT`, double-talk). As-built:
+pulls the aligned reference and advances the ramp, then passes bit-exact — kernel TODO, and
+the REF ring currently reads zeros (no live far-end producer until `in_tts` lands).
+
+**REF — the far-end reference (element without a node).** A routing column gating the
+`reference_manager` service AEC consumes: circular ring (1536 samples), integer bulk delay +
+fractional sub-sample interpolation, VI-Sense tap preferred over post-fader mixer when both
+exist. Producer ⛔: the target design feeds it **in-tick** from the `in_tts` playback path,
+making alignment a fixed constant instead of an estimation problem.
+
+**BEAM — spatial filter (channel-preserving, v0.3).** Design: MVDR/GSC over the two
+echo-cancelled mics — `chan[0]` = the steered beam (voice), `chan[1]` = the blocking-matrix
+noise reference kept for a future post-filter. As-built: pure 2→2 passthrough (frame
+untouched). It no longer mutates the channel count — that was moved out on 2026-07-19.
+
+**DMX — structural downmix (always on).** Ends the capture cascade: 2 → 1 by *selecting*
+`chan[0]` (pointer bookkeeping, zero sample writes, zero state). Runs in **every** mode
+(`ABOX_ELEM_STRUCTURAL`), because `out_0`'s contract (mono · f32 · 48 k, §13.2) holds
+regardless of what the routing matrix is doing. A weighted downmix would live here if a
+product ever wants one; a real GSC keeps `chan[1]` internal and DMX's job doesn't change.
+
+**CAPGATE — capture gate (structural node, built 2026-07-20).** The data-plane on/off
+switch for the clean feed, ending the cascade after DMX. Structural — *not* mask-gated,
+because a skipped stage is a passthrough, the opposite of a closed gate; instead its gain
+is `route_gain(mode, CAPGATE) × open`, so the routing matrix (idle/reset ⇒ 0 ⇒ out_0
+silent) and the runtime `START_CAPTURE`/`STOP_CAPTURE` handlers (now registered in abox —
+two formerly-dropped commands live) both apply. One-block linear ramp on transitions; when
+closed, out_0 carries zeros (consumers stay connected, hear nothing) — capture gating is
+now enforced in the data plane, not by consumer convention. Default open for bring-up;
+covered by `test_capgate`.
+
+**TTSOUT — playback gain / duck point (element, node pending).** Where the reply/narration
+stream will be gained into the output once the `in_tts` port exists: per-block gain ramp =
+the barge-in duck (mode `BARGE_IN_MUTING` drives it to 0), and the same tap feeds REF. ⛔
+Today the column drives nothing, since playback bypasses abox entirely.
+
+**vDMA-OUT — egress (structural).** Copies the slot's `chan[0]` into the `out_0` port buffer
+with the atomic master gain applied (`SET_VOLUME`), silences unproduced ports, releases the
+slot. The last Hermes instruction capture samples execute before they belong to PipeWire.
+
+*(Deliberately **not** nodes: VAD — a separate always-on process per the perception design
+(§16.7 known-gaps; silero in the ear process), with only a dumb onset-duck reflex ever
+planned in-graph; and the wake-word spotter — VTS's own raw tap, never inside the cascade.)*
 
 ### 13.3 Mode gating & routing matrix (`abox_routing.c`, `abox_graph.c`)
 `abox_mode` (`abox_node.h:21`):
@@ -496,8 +630,9 @@ lossless and BEAM passes chan[0], not an average). When real kernels land, this 
 | `ABOX_MODE_CONVERSATION` | 2 | full duplex |
 | `ABOX_MODE_SYSTEM_RESET` | 3 | safe/muted |
 
-Controllable elements (matrix columns, `abox_node.h:29`): `SRC, AEC, REF, BEAM, SES, CAPGATE,
-TTSOUT` (`ABOX_ELEM_COUNT=7`). A per-mode gain matrix `kGain[4][7]` (`abox_routing.c:8`) → a
+Controllable elements (matrix columns, `abox_node.h:29`): `SRC, AEC, REF, BEAM, SES *(retired,
+§13.2 — column reserved, always 0)*, CAPGATE, TTSOUT` (`ABOX_ELEM_COUNT=7`). A per-mode gain
+matrix `kGain[4][7]` (`abox_routing.c:8`) → a
 `uint32_t` active **bitmask** (`abox_active_mask`); the graph runs a stage only if its element bit
 is set, else zero-copy passthrough. Mode is set by the control thread (`SET_MODE`) and read per
 block with an **acquire load** — no lock.
@@ -554,11 +689,15 @@ Transition table:
 
 | Trigger (event) | From | Action | To |
 |-----------------|------|--------|----|
-| `WAKE_CONFIRMED` | IDLE | `startTurn()`: `DISARM` VTS, `OPEN_STREAM`, `START_CAPTURE` | CAPTURE |
+| `WAKE_CONFIRMED` | IDLE | `startTurn()`: `DISARM` VTS, `SET_MODE{CONVERSATION}`, `OPEN_STREAM`, `START_CAPTURE` | CAPTURE |
 | `STT_ENDPOINT` | CAPTURE | `UTTERANCE_END`, `STOP_CAPTURE` | THINK |
 | `TTS_CHUNK` (first) | THINK | `PLAY_TTS`, `ARM_BARGE_IN` (reset `ttsEnded_`) | SPEAK |
 | `TTS_STREAM_END` | any | set `ttsEnded_=true` (wait for drain) | *(hold)* |
-| `PLAYBACK_DRAINED` ∧ `ttsEnded_` | SPEAK | `STOP_TTS`, `DISARM_BARGE_IN`, `SET_MODE`(→KEYWORD_LISTENING), `ARM` VTS | IDLE |
+| `PLAYBACK_DRAINED` ∧ `ttsEnded_` | SPEAK | `STOP_TTS`, `DISARM_BARGE_IN`, `SET_MODE{KEYWORD_LISTENING}`, `ARM` VTS | IDLE |
+
+*(2026-07-19: `SET_MODE` now **carries the EngineMode as its body** — it was previously sent
+bodyless, which `AudioCore::onSetMode` ignores (`abox_main.cpp:34`), leaving the mode machine
+inert; `startTurn()` also gained the `SET_MODE{CONVERSATION}` it was missing.)*
 | `BARGE_IN` (URGENT) | SPEAK | `ABORT` llm_connector (URGENT) only — **no SET_MODE here; duck is ABOX-local** | BARGE_DUCK |
 | `MODE_CHANGED` | BARGE_DUCK | `STOP_TTS` + `startTurn()` (DISARM VTS, OPEN_STREAM, START_CAPTURE) | CAPTURE |
 | `UNPLUGGED` (codec fault) | any | reset pipeline, abort llm, reset codec | FAULT |
@@ -711,7 +850,7 @@ loopback test (SYS-04) exercises end-to-end.
                           ▼
                     ABOX reference_manager  ◄── AEC subtracts the played audio from the mic
  ── parallel capture spine (always live) ──────────────────────────────────────────────────
- mic ─in_0,in_1─► hermes.abox:  SRC → AEC → BEAM → SES ─out_0─► clean mono (→ STT / VAD)
+ mic ─in_0,in_1─► hermes.abox:  SRC → AEC → BEAM → DMX → CAPGATE ─out_0─► clean mono (→ STT / VAD)
                   (mode-gated cascade, 240-frame / 5 ms quantum, A76 worker pool)
 ```
 
@@ -732,8 +871,8 @@ supervisor(1)        story_agent(8)              llm_connector(5)            abo
 ```
 **Status:** ⚠ framework — `story_agent` loop, `PLAY_SEGMENT`/`SEGMENT_STARTED`/`STORY_DONE` and the
 position pointer are built; the **`PLAY_SEGMENT` handler in `llm_connector` is ⛔ not implemented**
-(no clip resolution / PW playback yet). On the capture spine SRC is real; AEC/BEAM/SES are
-passthrough stubs (ABOX-11 asserts bit-exact transport today).
+(no clip resolution / PW playback yet). On the capture spine SRC is real; AEC/BEAM are
+passthrough stubs and DMX is unbuilt (ABOX-11 asserts bit-exact transport today).
 
 ### 16.6 Use Case — Playback with TTS (on-the-fly synthesis)
 **Goal:** speak audio that is **not cached** — an interactive answer (UC-2/UC-3) or an uncached
@@ -782,6 +921,324 @@ story_agent(8)        llm_connector(5)                                   abox(2)
 **Status:** ⚠ skeleton — `route()` (120-char heuristic) and the `UTTERANCE_END→LLM_BEGIN`/
 `TTS_CHUNK→PLAY_TTS` wiring through the FSM exist; **`runLocal`/`runCloud` (actual STT/LLM/TTS) and
 the guardrail output gate are ⛔ stubs/TODO**, and the `PLAY_SEGMENT` synthesis branch (B) is unbuilt.
+*(Partially superseded — see §16.7 for the as-built voice loop: STT is resident-in-process and the
+cloud LLM call is real as of the v0.3 capture slice.)*
+
+### 16.7 End-to-End Data Flow — mic → text → cloud → speaker (as-built, 2026-07-20)
+
+The complete life of one interactive turn's data, hop by hop, exactly as the code stands after
+the **v0.3 capture slice** (out_0 → `AudioRing` → resident STT). Legend: ✅ built · 🆕 built in
+this slice · ⚠ partial · ⛔ pending.
+
+```
+════ DATA PLANE — PipeWire graph, one 5 ms cycle, zero-copy SHM ═══════════════════════════════
+ I2S DMA ─IRQ─► ALSA source node (the graph DRIVER; the mic crystal IS the system clock)
+                    │ fan-out: every consumer gets the same period, same cycle
+        ┌───────────┼───────────────────────┐
+        ▼           ▼                       ▼
+  hermes.abox    hermes-vts-mic         hermes-cc-mic
+  in_0,in_1      (VTS raw tap 16 k)     (llm_connector; HERMES_PW_CAP_TARGET=hermes.abox
+  48 k f32       ├► PrerollRing (SHM,    links it to out_0 🆕 — unset ⇒ raw mic)
+        │        │   3 s history) ✅          ▲
+  vDMA-IN ✅     └► KWS "hey aria" ✅         │ same-cycle SHM link 🆕
+  SRC ✅→AEC ⚠→BEAM ⚠→DMX ✅→CAPGATE ✅ ── vDMA-OUT ══ out_0 (mono·f32·48 k, §13.2 contract)
+════ CONSUMER EDGE — llm_connector process ════════════════════════════════════════════════════
+  s_capture (PW RT thread): ring_.push(240 fr) 🆕      [lock-free SPSC AudioRing<96000>, 2 s]
+  sttLoop (worker): pop 100 ms chunks → resident sherpa streaming zipformer 🆕
+      AcceptWaveform(48 k) → internal 16 k features → incremental decode (partials live)
+  vadLoop: RMS endpoint (400 ms speech / 900 ms silence) ✅   [target: ear-VAD SPEECH_OFF ⛔]
+      endpoint → finalize handshake (finalizeGen_/turnGen_) 🆕 → ★ TRANSCRIPT (UTF-8 string) ★
+                                        ── AUDIO DIES HERE, ON-DEVICE ──
+════ CONTROL PLANE — POSIX-mq CMsg (20 B hdr + ≤256 B) ════════════════════════════════════════
+  WAKE_CONFIRMED 0x380 {wake_pos,from_pos,epoch} ✅ (body unread ⛔) → FSM startTurn:
+  DISARM 0x301 · SET_MODE{CONVERSATION} 🆕 · OPEN_STREAM{wake body → preroll} 🆕 · START_CAPTURE 🆕(capgate)
+  STT_ENDPOINT 0x584 → UTTERANCE_END 0x502 → … → STT_FINAL 0x583 {text} (⛔ unrouted — dropped)
+════ NETWORK — the ONLY hop that leaves the device, string-only ═══════════════════════════════
+  groq_chat(): transcript in JSON ──HTTPS──► api.groq.com llama-3.1-8b ──SSE──► reply text ✅
+════ RETURN PATH — text back to air ═══════════════════════════════════════════════════════════
+  run_tts(): Piper subprocess ⚠ → 22.05 k PCM → ttsWav_ (gen-gated install 🆕)
+  s_playback: connector's OWN PW stream → speaker  ⚠ [target: abox in_tts → TTSOUT duck ⛔]
+  TTS_CHUNK 0x587 / TTS_STREAM_END 0x588 → FSM; PLAYBACK_DRAINED 0x286 emitted by the
+  connector (impersonating module 2 ⚠ — truthful only once playback transits abox)
+```
+
+**Hop table** (payload · unit · mechanism · code · status):
+
+| # | Hop | Payload / format | Unit / rate | Mechanism | Code | |
+|---|-----|------------------|-------------|-----------|------|:---:|
+| 1 | I2S→ALSA→driver | s16/s32 PCM 2 ch | DMA period / 5 ms | hardware + kernel | — | ✅ |
+| 2 | driver → consumers | f32 PCM | 240 fr / cycle | PW fan-out, SHM zero-copy, eventfd | `Pw.cpp` | ✅ |
+| 3 | abox cascade | f32 2 ch → 1 ch clean | in-place per block | vDMA-IN → mask-gated nodes → vDMA-OUT | `buffer_pipeline.c` | ⚠ kernels |
+| 4 | out_0 → connector | f32 mono 48 k | 240 fr, same cycle | PW link (`node.target`, WirePlumber) | `Pw.cpp:187` | 🆕 |
+| 5 | RT → worker | f32 samples | push 5 ms / pop 100 ms | `AudioRing<96000>` lock-free SPSC | `AudioRing.hpp` | 🆕 |
+| 6 | audio → **string** | PCM → UTF-8 transcript | streaming, final ~ms after endpoint | resident sherpa zipformer (loads once at `Start()`) | `llm_connector` `sttLoop` | 🆕 |
+| 7 | wake pointer | `{wake_pos,from_pos,epoch}` 20 B | per wake | CMsg on mq — a *pointer into the past*, never samples | `PrerollRing.hpp` | ✅ sent / ⛔ read |
+| 8 | turn control | CMsg ids (§12) | 20–276 B | POSIX mq, 3 prio lanes | `MsgBus.cpp` | ✅ |
+| 9 | **string → cloud** | transcript in JSON | one HTTPS request | connector's TLS socket (libcurl) — *the only network hop* | `groq_chat()` | ✅ |
+| 10 | reply → PCM | text → f32 22.05 k | per reply | Piper subprocess | `run_tts()` | ⚠ |
+| 11 | PCM → speaker | f32 | 5 ms cycles | connector's own PW playback stream (⛔ not via abox `in_tts` yet) | `s_playback` | ⚠ |
+
+#### 16.7.1 Detailed walkthrough — mic → STT → cloud (call-level, one utterance)
+
+Thread legend: **[PW-abox]** abox's PipeWire RT thread · **[PW-cc]** the connector's PipeWire RT
+thread · **[stt]** connector `sttLoop` worker · **[vad]** connector `vadLoop` · **[recv]**
+connector MsgBus recv thread · **[pipe]** the per-turn detached `pipeline()` thread ·
+**[fsm]** supervisor FSM thread.
+
+```
+① CAPTURE — every 5 ms, forever
+   [PW-abox] driver tick → on_process (Pw.cpp:58)
+       n = pos->clock.duration                          = 240 frames
+       in0/in1 = pw_filter_get_dsp_buffer(port, 240)    2 × 960 B, graph SHM
+       abox_block → hermes_pipeline_process_tick:
+         core_in_progress[slot]? busy → soft-drop (drops++), else:
+         bp_ingest: memcpy in0,in1 → slot.frame          2 × 960 B
+         graph tick (mask-gated): SRC(real)→AEC(stub)→BEAM(stub: ch0)
+         bp_egress: memcpy frame.ch0 × gain → out_0      960 B
+   cost ≈ tens of µs; deadline 5 ms; overrun ⇒ Soft-Mute zero-fill, never an Xrun
+
+② DELIVERY — same cycle
+   link hermes.abox:out_0 → hermes-cc-mic (created once by WirePlumber from
+   node.target="hermes.abox"): the graph maps the SAME memfd pages into the
+   connector and rings its eventfd → [PW-cc] wakes, dequeues the buffer, calls
+     s_capture(user, samples, 240, rate):
+       rms_ ← √(Σs²/240)                  (feeds the VAD; atomic store)
+       capturing_? ring_.push(samples,240) — wp_+=240 (release); full ⇒ drop-new,
+                                            overruns_+=n (never blocks, never allocs)
+   RT work per cycle: one memcpy-equivalent + 2 atomics.  ring high-water ≈ 2 cycles
+
+③ RECOGNITION — concurrent with capture (this is why the transcript is "instant")
+   [stt] loop: n = ring_.pop(chunk, 4800)               ≤100 ms per pop
+       gate: !capturing_ && finalizeGen_==0 ⇒ discard (stale idle block)
+       SherpaOnnxOnlineStreamAcceptWaveform(stream, 48000, chunk, n)
+         └ internal: 48 k→16 k resample → 80-dim fbank (25 ms win / 10 ms hop)
+       while IsOnlineStreamReady: DecodeOnlineStream    zipformer chunk-16
+         └ transducer greedy search → hypothesis grows: "why" → "why is the sky…"
+   model resident since Start() (one ~4 s load at boot — never per-utterance)
+
+④ ENDPOINT — deciding the child stopped
+   [vad] every 50 ms: rms_ > 0.008 ? speechMs+=50 : silenceMs+=50
+       speechMs ≥ 400 ⇒ hadSpeech; hadSpeech ∧ silenceMs ≥ 900 ⇒
+       SendMsg(SUPERVISOR, STT_ENDPOINT 0x584)          20 B CMsg, mq
+   [fsm] onSttEndpoint (SS_CAPTURE): UTTERANCE_END 0x502 → connector,
+       STOP_CAPTURE 0x202 → abox (capgate closes 🆕), enter(SS_THINK)
+   [recv] onUttEnd: capturing_=false; finalizeGen_=turnGen_; spawn [pipe]
+
+⑤ FINALIZE — the string is born
+   [stt] ring drains to empty → sees finalizeGen_≠0 (exchange→g):
+       InputFinished → decode remaining → GetResult → text
+       StreamReset (fresh for next turn)
+       lock(pcmMtx_): turnGen_==g ? { sttResult_=text; sttDone_=true } : discard(stale)
+       sttCv_.notify_all()
+   [pipe] wakes from sttCv_.wait_for (predicate: sttDone_‖abort_‖stopping_‖gen-change)
+       → transcript in hand, ~ms after the endpoint fired
+
+⑥ CLOUD — the only bytes that leave the device
+   [pipe] SendMsg(SUPERVISOR, STT_FINAL 0x583, text)    ≤256 B (⛔ unrouted today)
+       hist ← copy(history_) under lock
+       groq_chat(key, transcript, hist):
+         POST https://api.groq.com/openai/v1/chat/completions   TLS, timeout 30 s
+         { "model":"llama-3.1-8b-instant",
+           "messages":[ {system: kSystemPrompt}, …hist…, {user: transcript} ] }
+         ← choices[0].message.content → reply
+       lock: turnGen_ still mine? append (user,assistant) to history_ (cap 20)
+   key from GROQ_API_KEY env / /etc/anime-ai/secrets.env — provisioned, not embedded
+```
+
+Timing profile of the whole chain (real A76 target): speech is decoded **while spoken** (③ runs
+concurrently with ①/②), so end-of-speech → transcript ≈ the 900 ms VAD silence window + ~ms of
+finalize; transcript → first reply token is the cloud round-trip. The 4 s model load that used
+to sit inside every turn is now paid once at boot. On QEMU (≈4.5× RTF) ③ lags live audio and
+the finalize wait absorbs the backlog (bounded at 60 s).
+
+**The three transformation boundaries** (each is a one-way door):
+1. **dirty → clean** (hop 3): 2-mic raw becomes one echo-cancellable mono — everything that
+   *listens* consumes this, nothing upstream of it.
+2. **audio → string** (hop 6): the transcript is born **on-device**; no audio survives past the
+   recognizer. This is the privacy boundary (§9.3/NFR-9) expressed as data flow.
+3. **string → audio** (hop 10): the reply is re-embodied locally; the network never carries a
+   sample in either direction.
+
+**Standing invariants** (violations are architecture bugs): the mq bus never carries audio
+(≤276 B messages make it physically impossible — 5 ms of audio is 960 B); PipeWire never touches
+the network; the network carries only strings; bulk audio moves exclusively by shared memory
+(PW buffers, PrerollRing, `/hermes.out0` when the TAP node lands).
+
+**Where audio is ever at rest** (complete buffering inventory): PrerollRing (3 s sliding, SHM) ·
+`AudioRing` (≤2 s transit, normally ~10 ms) · sherpa decoder state (features, not PCM) ·
+`ttsWav_` (one reply, until drained). Nothing else holds samples; there is no disk in the live
+path (the `/tmp` WAV exists only in the no-sherpa fallback).
+
+**Known gaps this section makes visible** (tracked in §21/§22 — updated 2026-07-20 after the
+Tier-1 batch): ~~`STT_FINAL` unrouted~~ → now delivered to `story_agent` ✅; ~~CAPGATE
+unimplemented~~ → structural gate node + `START/STOP_CAPTURE` handlers ✅; ~~preroll backfill
+unread~~ → `WakeConfirmedBody` forwarded through `OPEN_STREAM`, ring history spliced into the
+recognizer before live audio ✅. Still open: playback bypasses abox (`PLAYBACK_DRAINED`
+impersonated, TTSOUT duck inert — `in_tts` port pending); VAD endpoint is the connector's RMS
+loop, not the ear-process silero design; WirePlumber link rule is launch-script/env, not yet
+target-image policy.
+
+### 16.8 UC-12 — Audio Capture (mic → STT → cloud → spoken answer)
+
+**Goal:** the listener speaks after the wake word; the device turns their speech into text
+**on-device**, sends only that text to the cloud LLM, and speaks the reply — the canonical
+interactive turn as the audio subsystem sees it. (UC-2 describes the same turn from the FSM's
+perspective; UC-12 is its data-path realization, detailed hop-by-hop in §16.7/§16.7.1.)
+
+**Actors:** listener · VTS (wake + preroll) · abox (clean feed) · llm_connector (ring →
+resident STT → cloud → TTS) · supervisor FSM · cloud LLM (Groq today).
+**Preconditions:** abox running with mic links; connector launched with
+`HERMES_PW_CAP_TARGET=hermes.abox`; STT model present (else subprocess fallback); network up
+(else `LLM_ERROR` → IDLE).
+**Trigger:** `WAKE_CONFIRMED` (today's only working key; PTT and VAD barge-in are the two
+designed-but-unwired alternates, §5 UC-8/UC-3).
+
+**Main flow** (compressed — full call-level ladder in §16.7.1):
+```
+1  wake → FSM startTurn: DISARM VTS · SET_MODE{CONVERSATION} · OPEN_STREAM · enter CAPTURE
+2  every 5 ms: mic ═ abox SRC→AEC→BEAM→DMX→CAPGATE ═ out_0 ═(PW link)═ s_capture → AudioRing.push
+3  concurrently: sttLoop pops 100 ms chunks → resident sherpa decodes WHILE the child speaks
+4  RMS-VAD endpoint (400/900 ms) → STT_ENDPOINT → FSM: UTTERANCE_END · enter THINK
+5  sttLoop drains ring → finalize → transcript published (gen-gated) → pipeline() wakes
+6  transcript → STT_FINAL on the bus · transcript JSON → HTTPS → cloud LLM → reply text
+7  reply → Piper TTS → connector playback stream → speaker; TTS_CHUNK/…/PLAYBACK_DRAINED
+8  FSM: STOP_TTS · SET_MODE{KEYWORD_LISTENING} · ARM VTS · enter IDLE
+```
+
+**Call sequence (as-built v0.3)** — one continuous graph, transducer to cloud and back.
+Lanes: the PipeWire graph/driver (hardware side) · abox(2) · VTS(3) · supervisor(1) · 
+llm_connector(5) · cloud. `═` data plane (SHM, per-cycle) · `─` control plane (CMsg/mq) · 
+numbered banners are phases of the SAME timeline, not separate diagrams.
+
+```
+mic/ALSA/PW graph    abox(2)             VTS(3)              supervisor(1)/FSM       llm_connector(5)      CLOUD
+(the driver)            │                   │                        │                      │
+── ① CONTINUOUS INGRESS — every 5 ms, forever (hardware → driver → callbacks) ────────────────────────────────
+ADC ─I2S/TDM─► DMA      │                   │                        │                      │
+ period-complete IRQ    │                   │                        │                      │
+ (CPU0-3, irqaffinity)  │                   │                        │                      │
+ ALSA source = DRIVER,  │                   │                        │                      │
+ cycle N: s16→f32 into  │                   │                        │                      │
+ SHM; fan-out + eventfd:│                   │                        │                      │
+ ╠═ in_0,in_1 (48 k) ══►│ on_process (Pw.cpp:58, RT thread):         │                      │
+ ║                      │  n = pos->clock.duration (=240)            │                      │
+ ║                      │  pw_filter_get_dsp_buffer(port, n)         │                      │
+ ║                      │  └ abox_block → hermes_pipeline_process_tick():                   │
+ ║                      │     bp_ingest  = vDMA-IN.process  (2×960 B → slot)                │
+ ║                      │     abox_graph_tick(mask 0x00): all SKIP…  │                      │
+ ║                      │       …except dmx_process (STRUCTURAL — runs every mode)          │
+ ║                      │     bp_egress  = vDMA-OUT.process ×gain ═ out_0 (idle, unread)    │
+ ╚═ vts-mic (→16 k) ═══════════════════════►│ s_mic (PW RT thread):  │                      │
+                        │                   │  Preroll_Write (3 s SHM ring, writePos++)     │
+                        │                   │  audioRing_.push → kwdLoop: pop 1600 →        │
+                        │                   │  AcceptWaveform → Decode … "hey aria" HIT     │
+── ② WAKE → TURN START ───────────────────────────────────────────────────────────────────────────────────────
+                        │                   ├─ WAKE_CONFIRMED 0x380 ─►│ onWake [SS_IDLE]:   │
+                        │                   │   {wake,from,epoch}     │ startTurn()         │
+                        │                   │◄────── DISARM 0x301 ────┤                     │
+                        │◄─────────── SET_MODE 0x200 {2=CONV} 🆕 ─────┤ (latch mask 0x6F)   │
+                        │                   │                         ├─ OPEN_STREAM 0x500 ─►│ onOpen: ++turnGen_,
+                        │◄─────────── START_CAPTURE 0x201 🆕 ────────┤                      │ capturing_=true
+                        │  capgate opens (ramped)                    │                      │
+                        │                   │                         └ enter(SS_CAPTURE)   │
+── ③ CAPTURE + LIVE STT — every cycle N (data plane; never on the bus) ───────────────────────────────────────
+ ╠═ in_0,in_1 ═════════►│ on_process → …process_tick():              │                      │
+                        │  firewall: slot busy? soft-drop (drops++)  │                      │
+                        │  vDMA-IN.process: ports → slot.frame       │                      │
+                        │  abox_graph_tick(mask 0x6F):               │                      │
+                        │    src_process   (ratio 1.0 fast-path ✅)  │                      │
+                        │    aec_process   (ref read — zeros ⚠, bypass)                     │
+                        │    beam: default_process (2→2 bypass ⚠)    │                      │
+                        │    dmx_process:  channels=1 (select ch0 🆕)│                      │
+                        │    (CAPGATE·TTSOUT: matrix columns only —  │                      │
+                        │     no node files yet ⛔; REF is read      │                      │
+                        │     inside aec_process, not a node)        │                      │
+                        │  vDMA-OUT.process: chan[0] × gain          │                      │
+                        │  [async pool: worker@cpu5/6 runs the tick; │                      │
+                        │   deadline miss → abox_soft_mute zero-fill]│                      │
+                        ╞═ out_0 (mono·f32·48 k) ═(link, same cycle)═══════════════════════►│ stream evt →
+                        │                   │                        │                      │ s_capture(): rms_;
+                        │                   │                        │                      │  ring_.push(240) 🆕
+                        │                   │                        │                      │ sttLoop: ring_.pop(4800)
+                        │                   │                        │                      │  AcceptWaveform(48 k) →
+                        │                   │                        │                      │  IsReady/Decode… live 🆕
+── ④ ENDPOINT → TRANSCRIPT (audio dies on-device) ────────────────────────────────────────────────────────────
+                        │                   │                        │                      │ vadLoop (50 ms tick):
+                        │                   │                        │                      │  rms_>0.008: speechMs+=50
+                        │                   │                        │                      │  ≥400 ⇒ hadSpeech; then
+                        │                   │                        │                      │  silenceMs ≥900 ⇒
+                        │                   │                        │◄─ STT_ENDPOINT 0x584 ┤  SendMsg(0x584)
+                        │                   │        onSttEndpoint:  │                      │
+                        │◄─────────── STOP_CAPTURE 0x202 🆕 ─────────┤                      │
+                        │  capgate closes → out_0 silent             │                      │
+                        │                   │                        ├─ UTTERANCE_END 0x502 ►│ onUttEnd:
+                        │                   │                        └ enter(SS_THINK)      │  capturing_=false
+                        │                   │                        │                      │  finalizeGen_=turnGen_ 🆕
+                        │                   │                        │                      │  spawn pipeline() thread
+                        │                   │                        │                      │ sttLoop (ring now empty):
+                        │                   │                        │                      │  finalizeGen_.exchange(0)
+                        │                   │                        │                      │  InputFinished(stream)
+                        │                   │                        │                      │  while IsReady: Decode
+                        │                   │                        │                      │  GetOnlineStreamResult
+                        │                   │                        │                      │   → r->text; DestroyResult
+                        │                   │                        │                      │  StreamReset (next turn)
+                        │                   │                        │                      │  lock(pcmMtx_): gen==mine?
+                        │                   │                        │                      │   sttResult_=text,
+                        │                   │                        │                      │   sttDone_=true 🆕
+                        │                   │                        │                      │  sttCv_.notify_all()
+                        │                   │                        │                      │ pipeline(): wait_for
+                        │                   │                        │                      │  (sttDone_‖abort_‖stop‖
+                        │                   │                        │                      │   gen-change 🆕) wakes →
+                        │◄─ STT_FINAL 0x583 {text} ⛔no handler ─────────────────────────── ┤ ★ "why is the sky blue"
+── ⑤ CLOUD ROUND-TRIP — the only network hop; string only ────────────────────────────────────────────────────
+                        │                   │                        │                      │ pipeline() continues:
+                        │                   │                        │                      │  lock: hist=copy(history_) 🆕
+                        │                   │                        │                      │  groq_chat(key,text,hist):
+                        │                   │                        │                      │   json_escape + messages[]
+                        │                   │                        │                      │   curl_easy_setopt(URL,
+                        │                   │                        │                      │    Bearer, body, 30 s)
+                        │                   │                        │                      ├─ curl_easy_perform ─►│
+                        │                   │                        │                      │  {system,hist,user}  │ Groq
+                        │                   │                        │                      │◄─ choices[0].message ┤ llama-3.1
+                        │                   │                        │                      │   .content = reply   │
+                        │                   │                        │                      │  lock: gen==mine? append
+                        │                   │                        │                      │   (user,asst)→history_ 🆕
+                        │                   │                        │                      │ run_tts(reply): popen
+                        │                   │                        │                      │  piper → load_wav →
+                        │                   │                        │                      │  lock+gen: install ttsWav_ 🆕
+── ⑥ SPEAK → TURN END ────────────────────────────────────────────────────────────────────────────────────────
+                        │                   │                        │◄─ TTS_CHUNK 0x587 ───┤ (+ TTS_STREAM_END
+                        │                   │          onTtsChunk:   │                      │  0x588 back-to-back —
+                        │◄──── PLAY_TTS 0x203 · ARM_BARGE_IN 0x208 ──┤ ⛔both dropped        │  two-signal degenerates)
+                        │                   │                        ├ enter(SS_SPEAK)      │
+                        │                   │                        │ onTtsStreamEnd:      │
+                        │                   │                        │  ttsEnded_=true      │
+ 🔊 ◄═ speaker ◄════════ connector's OWN PW playback stream ◄══════ s_playback drains ══════╡ ⚠ bypasses abox
+                        │                   │                        │◄─ PLAYBACK_DRAINED ──┤ (module 5 emits an
+                        │                   │   onPlaybackDrained:   │   0x286              │  AUDIO_CORE id ⚠)
+                        │◄──── STOP_TTS · DISARM_BARGE_IN ⛔dropped ─┤                      │
+                        │◄─────────── SET_MODE 0x200 {0=KWD} 🆕 ─────┤ (latch mask 0x00)    │
+                        │                   │◄────── ARM 0x300 ──────┤                      │
+                        │                   │ armed_=true            └ enter(SS_IDLE)  ⟲ back to ①
+```
+
+**Alternate flows:** A1 *no speech* — VAD max-utterance cap or empty transcript →
+`STT_NO_SPEECH` → IDLE. A2 *abort/barge* — `ABORT` sets `abort_` + wakes the finalize wait;
+the turn's `pipeline()` exits at the next gate; a superseded turn is inert (generation
+counter). A3 *no sherpa at build* — `sttLoop` accumulates PCM; `run_stt()` subprocess
+transcribes at the endpoint (adds ~4 s model load per turn). A4 *abox absent* — targeted
+stream stays silent; unset the env to fall back to the raw mic (dev mode; forfeits AEC).
+A5 *test stub* — `HERMES_TEST_UTTERANCE` short-circuits step 5–6's STT with a fixed string.
+
+**Postconditions:** transcript+reply appended to `history_` (cap 20); no audio persisted
+anywhere (§16.7 buffering inventory); device re-armed in IDLE.
+
+**Status:** steps 1–6 ✅ as of the v0.3 capture slice + Tier-1 batch (2026-07-20) —
+clean-feed capture 🆕, `AudioRing` seam 🆕, resident streaming STT 🆕, mode body 🆕,
+**CAPGATE gate + `START/STOP_CAPTURE` handlers 🆕, preroll backfill 🆕 (gapless from the
+true utterance start), `STT_FINAL` → story_agent 🆕**; step 7 ⚠ (playback bypasses abox —
+`in_tts`/TTSOUT pending, `PLAYBACK_DRAINED` impersonated); guardrail output gate ⛔.
+Runtime validation on QEMU/target pending.
 
 ---
 
@@ -866,7 +1323,12 @@ for offline playback. Heavy expressive TTS happens here, once (cloud).
   content bundles; cloud secrets provisioned not embedded; bus is local IPC.
 - **Offline & degradation.** Cached books play offline; local recall works offline; cloud
   LLM/TTS/backup degrade to local/skip; missing sidecar → empty recall, agent still runs.
-- **Observability.** Per-module structured logs; bus event counters; abox `processed`/`drops`/
+- **Observability.** One logging surface: `hermes/common/Log.h` (`HM_LOG_*` macros —
+  TradingAlpha-compatible `YYYYMMDD HH:MM:SS:µs pid tid file:line <LEVEL> msg`;
+  `HERMES_LOG_LEVEL` filter; new code never uses raw fprintf). Dev-only per-node trace:
+  `HERMES_ABOX_TRACE=N` (enter/exit + per-node dt µs — NFR-8-unsafe, bring-up only).
+  Buffering health: `AudioRing` available/high-water/overrun counters logged every 2 s +
+  a per-turn `turn finalized: N ms decoded` summary. Plus abox `processed`/`drops`/
   Soft-Mute/Xrun counters and events; `gui_interface` live control + event feed in dev.
 
 ---
@@ -888,8 +1350,9 @@ CLOUD (optional, consented)
 - **Run/validate:** `scripts/build.sh {cross|native|run|test}`; `run_gui.sh`, `run_target.sh`,
   `run_loopback.sh`. `VALIDATION.md` = 6-step matrix; `SVVR.md` (Software Verification & Validation
   Report) = 11 ABOX sub-cases + 5 system tests.
-- **Tests:** `abox_selftest` (11 asserts incl. ABOX-11 bit-exact loopback), `test_eventmap`,
-  `test_msgbus`, `barge_in_e2e`, `kwd_wake_e2e` (5/5 passing). GoogleTest/CTest; sanitizers in CI.
+- **Tests:** `abox_selftest` (12 suites incl. ABOX-11 bit-exact loopback + `test_capgate`),
+  `test_eventmap`, `test_msgbus` (passing); `barge_in_e2e`, `kwd_wake_e2e` are `GTEST_SKIP`
+  placeholders (SVVR A-1 — not passes). GoogleTest/CTest; sanitizers in CI.
 
 ---
 
@@ -910,20 +1373,29 @@ CLOUD (optional, consented)
 
 ## 21. Implementation Status (honest)
 
-**Built ✅:** IPC contract (MsgBus/CMsg/EventMap/EventQueue/Catalog), Session FSM (all states +
-transitions + threading), ABOX RT engine (graph, routing matrix, vDMA, Core-Proportional buffer
-pool, worker pool, reference manager, param store, soft-mute), PipeWire hosting + locked 5 ms
-quantum, SRC node kernel, story_agent basic loop (script parse, position, play, barge-in
-pause/resume), Memory facade (recall/remember) + mem0 sidecar (HTTP, lazy init, graceful degrade,
-all-local config), gui_interface, cross-compile + test harness.
+**Built ✅** *(updated 2026-07-20)*: IPC contract (MsgBus/CMsg/EventMap/EventQueue/Catalog),
+Session FSM (states + transitions + threading; `SET_MODE` carries its body; wake body forwarded),
+ABOX RT engine (graph incl. structural stages, routing matrix — SES column retired, vDMA,
+buffer/worker pool, reference manager, param store, soft-mute), **DMX + CAPGATE nodes**
+(`START/STOP_CAPTURE` handled), PipeWire hosting + locked 5 ms quantum, SRC node kernel,
+**VTS wake word** (sherpa-onnx KWS + preroll-ring writer), **UC-12 capture path**
+(`out_0` clean-feed capture via `HERMES_PW_CAP_TARGET`, `AudioRing` seam, resident streaming
+STT with preroll backfill, `STT_FINAL` → story_agent, Groq cloud round-trip), `Log.h`
+logging + `HERMES_ABOX_TRACE` node trace, story_agent basic loop, Memory facade + mem0
+sidecar, gui_interface (incl. STT card), cross-compile + test harness, `run_voice.sh`.
+*(UC-12 runtime validation on QEMU/target pending — code-complete, host-verified.)*
 
-**Framework ⚠:** llm_connector (route() heuristic only; STT/runLocal/runCloud/abort cleanup TODO;
-no `PLAY_SEGMENT` handler), AEC/BEAM/SES DSP kernels (passthrough stubs), story_agent worker
-dispatch for `remember()`.
+**Framework ⚠:** llm_connector answer path (Groq/Piper real, but playback bypasses abox —
+`PLAYBACK_DRAINED` impersonated; abort not preemptive during curl/TTS; endpoint = RMS loop,
+not decoder/ear-VAD; guardrail output gate missing; no `PLAY_SEGMENT` handler), AEC/BEAM
+DSP kernels (passthrough stubs; AEC ref ring has no live far-end producer), story_agent
+worker dispatch for `remember()`, FSM timeouts (`TO_*` unhandled — `SS_FAULT` is terminal).
 
-**Planned ⛔:** VTS wake word, VAD barge-in node (the ≤12 ms KPI depends on it), guardrail output
-gate, local OKF retrieval backend, consolidation job, `exportMd`/parent erase, cloud LLM/TTS/backup,
-book pre-render pipeline, codec_hw, video_proc, optional mem0-at-scale & multi-device sync.
+**Planned ⛔:** `in_tts` playback port + TTSOUT duck (the barge-in prerequisite), VAD
+barge-in (ear-process silero; the ≤12 ms KPI depends on it), guardrail output gate, local
+OKF retrieval backend, consolidation job, `exportMd`/parent erase, cloud TTS/backup, book
+pre-render integration (studio bundle → `PLAY_SEGMENT`), codec_hw, video_proc,
+WirePlumber link policy on the target image, optional mem0-at-scale & multi-device sync.
 
 ---
 
@@ -936,7 +1408,7 @@ book pre-render pipeline, codec_hw, video_proc, optional mem0-at-scale & multi-d
    component yet produces `AUDIO_CORE::evt::BARGE_IN` — the VAD node is net-new and the ≤12 ms KPI
    depends on it. PTT (`START_SESSION`) is likewise unhandled (a no-wake entry into a turn).
 3. **DSP kernels are passthrough** — ABOX-11 asserts bit-exact today; the assertion must be
-   updated when real AEC/BEAM/SES land.
+   updated when real AEC/BEAM land.
 4. **mq depth = 10** (`kMqMaxMsg`, unprivileged limit) — verify under burst; URGENT lane protects
    barge-in but storms could drop DEFERRED.
 5. **`remember()` currently blocks the turn** (heavy mem0 extraction) — must move off the IPC
@@ -957,7 +1429,7 @@ book pre-render pipeline, codec_hw, video_proc, optional mem0-at-scale & multi-d
 - **P2:** real STT + interactive LLM (local) + expressive TTS; episodic logging off-thread.
 - **P3:** consolidation job (LLM→OKF); local semantic recall; book pipeline (cast/prerender).
 - **P4:** VAD barge-in node (≤12 ms); cloud-optional (backup, dashboard, complex-LLM).
-- **P5:** real AEC/BEAM/SES kernels; optional mem0 at scale; multi-device sync.
+- **P5:** real AEC/BEAM kernels; optional mem0 at scale; multi-device sync.
 
 ---
 
@@ -967,7 +1439,10 @@ book pre-render pipeline, codec_hw, video_proc, optional mem0-at-scale & multi-d
 `recall/remember/export` memory seam · **Quantum** the 5 ms / 240-sample RT period · **Soft-Mute**
 zero-fill fallback on a missed DSP deadline · **Consolidation** idle LLM pass distilling episodic →
 OKF · **CMsg** the control-plane wire message · **ModuleId** the process address on the bus ·
-**VTS** voice-trigger service (wake word) · **vDMA** virtual DMA ingress/egress in the buffer pool.
+**VTS** voice-trigger service (wake word) · **vDMA** **virtual** DMA — the software ingress/egress
+nodes (`abox_vdma.c`) moving samples between PipeWire port buffers and buffer-pool slots; the
+engine's only host↔engine memory boundary. *(Not to be confused with Part II's historical "VDMA"
+= Video DMA synchronization — see the Part II precedence note.)*
 
 **Companion docs:** `memory_architecture.md`, `story_agent_SDS.md`, `VALIDATION.md`,
 `SVVR.md`, `brain/README.md`, `brain/guardrails.md`. *(The former `AudioBox_DSP_Framework_SDS.md`
@@ -994,6 +1469,11 @@ and `abox_pipewire.md` are now **Part II** and **Part III** of this document, be
 > `CLOUD_CONNECTOR = 5` and **no** `STORY_AGENT(8)` / `GUI_INTERFACE(7)`. For the as-built addressing
 > and catalog use **Part I §10 / §12**; Part II §17.3 carries the SDS's own reconciliation notes.
 > **Section numbers below (§1–§18) are Part II-local** (inline `§N` references resolve within Part II).
+> **Terminology caution — "VDMA":** in this Part's historical text (e.g. §1) **VDMA means *Video*
+> DMA synchronization** (A/V lip-sync — the concern now parked in the `video_proc(4)` stub). In the
+> as-built engine and everywhere in Part I, **vDMA means *virtual* DMA** — the software
+> ingress/egress nodes moving samples between PipeWire buffers and buffer-pool slots
+> (`abox_vdma.c`, Part I §24 glossary). Same letters, unrelated concepts; Part I's meaning governs.
 > **v2 architecture changes** (supersede v1): (1) compute is **mode-adaptive** — the big cluster is only spun up when there is actual echo/streaming work, so the device idles cheaply in keyword-listening; (2) the worker pool uses a **hybrid park/spin** wake instead of unconditional busy-spin, so big cores sleep ~80% of the time; (3) AEC is **partitioned-block frequency-domain (PBFDAF)** with a real ~190 ms tail plus explicit reference/loopback delay alignment; (4) the engine is a **mode-selected processing graph (DAG)** of nodes with declared dependencies rather than a single hard-coded sequence.
 
 > **As-built note:** §1–§17 are the design intent. For what is *actually implemented* today — the **C data plane** (`abox_node` vtable, mask-gated graph tick, reference manager, self-claim worker pool, param store), the integration decisions **D9–D12** (§17.1), and the **current buffering/overflow reality** (Soft-Mute, not yet the §10 multi-buffer) — see **§18**.

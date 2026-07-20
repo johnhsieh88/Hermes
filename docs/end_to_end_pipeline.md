@@ -59,7 +59,7 @@ device, across the two build paths that make up the product.
                                                                                      [RK3588 · C11 RT + C++17 · PipeWire/MsgBus]
    Bundle on device  ─►  INGEST / MAP (§5)                     ─►  story_agent(8)  ─►  llm_connector(5)  ─►  abox(2) ─► speaker
    /var/lib/hermes/       utterances → indexed segments            position pointer     PLAY_SEGMENT(idx):     SRC→AEC→
-   books/<id>/            characters → OKF Character/BookFact       + casting            resolve idx →          BEAM→SES
+   books/<id>/            characters → OKF Character/BookFact       + casting            resolve idx →          BEAM→DMX
                           casting    → OKF + voice profiles         START/PAUSE/         ├─ CACHED clip ────────► (§16.5)
                           audio/<h>  → clip cache (key=hash)        RESUME               └─ (uncached) live TTS ─► (§16.6)
                                                                         ▲                         ▲
