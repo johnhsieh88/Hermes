@@ -1,7 +1,7 @@
 /* node_common.h — shared scaffolding for the per-file DSP nodes (SDS §4). Holds the
  * node allocator and the no-op default vtable slots reused by every node, plus each
  * node type's constructor (the factory in abox_nodes.c dispatches to these). One node
- * per source file (src_node.c, aec_node.c, beamform_node.c, dmx_node.c). */
+ * per source file (src_node.c, aec_node.c, beamform_node.c, dmx_node.c, capgate_node.c). */
 #ifndef HERMES_ABOX_NODE_COMMON_H
 #define HERMES_ABOX_NODE_COMMON_H
 
@@ -31,6 +31,9 @@ abox_node* abox_src_create(void);
 abox_node* abox_aec_create(void);
 abox_node* abox_beamform_create(void);
 abox_node* abox_dmx_create(void);
+abox_node* abox_capgate_create(void);
+/* CAPGATE runtime control (control thread → RT-read atomic): START/STOP_CAPTURE. */
+void abox_capgate_set_open(abox_node* n, int open);
 
 #ifdef __cplusplus
 }

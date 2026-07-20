@@ -276,6 +276,37 @@ static void test_async_pipeline(void) {
     abox_node_destroy(beam); abox_node_destroy(dmx);
 }
 
+/* CAPGATE: closed → silence; open+CONVERSATION → identity (after the one-block ramp);
+ * open+KEYWORD_LISTENING → silence too (the routing matrix gain is 0 in idle). */
+static void test_capgate(void) {
+    abox_node* g = abox_node_create("capgate");
+    assert(g);
+    float ch0[8];
+    abox_frame io; io.chan[0] = ch0; io.chan[1] = 0; io.channels = 1; io.frames = 8;
+
+    io.mode = ABOX_MODE_CONVERSATION;                 /* open (default) + gain 1 → identity */
+    for (int i = 0; i < 8; ++i) ch0[i] = 1.0f;
+    g->ops->process(g, &io);
+    for (int i = 0; i < 8; ++i) assert(feq(ch0[i], 1.0f));
+
+    abox_capgate_set_open(g, 0);                      /* closed → ramp down, then hard zero */
+    for (int i = 0; i < 8; ++i) ch0[i] = 1.0f;
+    g->ops->process(g, &io);                          /* ramp block */
+    assert(ch0[7] < 0.2f);
+    for (int i = 0; i < 8; ++i) ch0[i] = 1.0f;
+    g->ops->process(g, &io);                          /* settled: silence */
+    for (int i = 0; i < 8; ++i) assert(feq(ch0[i], 0.0f));
+
+    abox_capgate_set_open(g, 1);
+    io.mode = ABOX_MODE_KEYWORD_LISTENING;            /* open but idle-mode gain 0 → silence */
+    for (int i = 0; i < 8; ++i) ch0[i] = 1.0f;
+    g->ops->process(g, &io);                          /* ramp toward 0 */
+    for (int i = 0; i < 8; ++i) ch0[i] = 1.0f;
+    g->ops->process(g, &io);
+    for (int i = 0; i < 8; ++i) assert(feq(ch0[i], 0.0f));
+    abox_node_destroy(g);
+}
+
 /* Loopback / bypass (BASIC TC, mirrors scripts/run_loopback.sh at unit level). With no DSP
  * kernels yet every node is a passthrough, so the whole src→aec→beam→dmx chain is an identity
  * on chan[0]. Feeds a distinctive tone on the L mic and a DIFFERENT DC level on the R mic; once
@@ -376,6 +407,7 @@ int main(void) {
     test_param_store();
     test_buffer_pipeline();
     test_src_node();
+    test_capgate();
     test_playback_pipeline();
     test_async_pipeline();
     test_loopback_bypass();

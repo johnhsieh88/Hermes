@@ -12,7 +12,7 @@
 extern "C" {
 #endif
 
-/* Factory by type name ("src" | "aec" | "beamform" | "dmx"). NULL on unknown / OOM. */
+/* Factory by type name ("src" | "aec" | "beamform" | "dmx" | "capgate"). NULL on unknown / OOM. */
 abox_node* abox_node_create(const char* type);
 void       abox_node_destroy(abox_node* n);
 
@@ -22,6 +22,11 @@ void abox_aec_set_ref(abox_node* aec, abox_ref_manager* ref);
 /* SRC-specific: set the ASRC drift ratio (input samples per output, ≈1.0). The §5 PI
  * loop calls this each control tick; 1.0 is an exact identity. */
 void abox_src_set_ratio(abox_node* src, double ratio);
+
+/* CAPGATE-specific: runtime open/close (START/STOP_CAPTURE handlers). Atomic store on the
+ * control thread; the RT process() acquire-reads it. Effective gain also multiplies the
+ * routing-matrix CAPGATE gain, so idle/reset modes silence out_0 regardless of `open`. */
+void abox_capgate_set_open(abox_node* gate, int open);
 
 #ifdef __cplusplus
 }

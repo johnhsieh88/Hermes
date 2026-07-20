@@ -1,9 +1,11 @@
 // hermes_abox — the AUDIO_CORE process (ModuleId 2). The live data plane is the C
 // engine: one PipeWire filter whose on_process drives the Core-Proportional Buffer Pool
-// (buffer_pipeline.c) over the C abox_node graph (src→aec→beamform→dmx). This file is the
+// (buffer_pipeline.c) over the C abox_node graph (src→aec→beamform→dmx→capgate). This file is the
 // ONLY pw_* boundary (the bridge); the nodes never see PipeWire. The control module drives
 // the engine's EngineMode atomically from SET_MODE (approach B, no re-routing).
 #include "audio_core/abox/abox_nodes.h"
+#include "audio_core/abox/nodes/node_common.h"
+#include "hermes/common/Log.h"
 #include "audio_core/abox/abox_vdma.h"
 #include "audio_core/abox/buffer_pipeline.h"
 #include "audio_core/abox/reference_manager.h"
@@ -21,11 +23,14 @@ namespace hermes {
 // this; the RT data-loop reads the mode per block (lock-free) inside process_tick.
 class AudioCore : public MsgBus, public EventMap<AudioCore> {
 public:
-    explicit AudioCore(hermes_buffered_pipeline* eng) : eng_(eng) {
+    AudioCore(hermes_buffered_pipeline* eng, abox_node* capgate)
+        : eng_(eng), capgate_(capgate) {
         Add(_AudioCore::cmd::SET_MODE,       &AudioCore::onSetMode);
         Add(_AudioCore::cmd::SET_VOLUME,     &AudioCore::onSetVolume);
         Add(_AudioCore::cmd::RESET_PIPELINE, &AudioCore::onReset);
-        // TODO: START_CAPTURE / DUCK_PLAYBACK / ARM_BARGE_IN → finer controls.
+        Add(_AudioCore::cmd::START_CAPTURE,  &AudioCore::onStartCapture);
+        Add(_AudioCore::cmd::STOP_CAPTURE,   &AudioCore::onStopCapture);
+        // TODO: DUCK_PLAYBACK / ARM_BARGE_IN → finer controls (in_tts epic).
     }
     int ProcessMsg(CMsg* m) override { return Execute(m->hdr.id, m); }
 
@@ -41,7 +46,13 @@ private:
             hermes_pipeline_set_gain(eng_, *static_cast<const float*>(m->pBody));  // 0..N, 1.0 = unity
     }
     void onReset(const CMsg*) {}                       // TODO: §6.2 reset pipeline
+    // CAPGATE (§13.2.1): the data-plane capture gate — out_0 emits silence when closed.
+    void onStartCapture(const CMsg*) { HM_LOG_INFO("START_CAPTURE → capgate open");
+                                       abox_capgate_set_open(capgate_, 1); }
+    void onStopCapture(const CMsg*)  { HM_LOG_INFO("STOP_CAPTURE → capgate closed");
+                                       abox_capgate_set_open(capgate_, 0); }
     hermes_buffered_pipeline* eng_;
+    abox_node*                capgate_;
 };
 
 } // namespace hermes
@@ -75,9 +86,11 @@ int main() {
     abox_node* aec  = abox_node_create("aec");
     abox_node* beam = abox_node_create("beamform");
     abox_node* dmx  = abox_node_create("dmx");
-    if (!src || !aec || !beam || !dmx) return 2;
+    abox_node* gate = abox_node_create("capgate");
+    if (!src || !aec || !beam || !dmx || !gate) return 2;
     src->ops->prepare(src, &cfg);   aec->ops->prepare(aec, &cfg);
     beam->ops->prepare(beam, &cfg); dmx->ops->prepare(dmx, &cfg);
+    gate->ops->prepare(gate, &cfg);
     abox_aec_set_ref(aec, &ref);
 
     // Ingress/egress as real vDMA NODES (capture→slot / slot→playback). The coordinator
@@ -92,12 +105,13 @@ int main() {
     hermes_pipeline_add_stage(&engine, aec,  ABOX_ELEM_AEC);
     hermes_pipeline_add_stage(&engine, beam, ABOX_ELEM_BEAM);
     hermes_pipeline_add_stage(&engine, dmx,  ABOX_ELEM_STRUCTURAL);  // always-on 2→1 (§13.2)
+    hermes_pipeline_add_stage(&engine, gate, ABOX_ELEM_STRUCTURAL);  // capture gate (mode × cmd)
 
     // ── PipeWire: connect, control plane, then the one filter that runs the engine ──
     pw::PwClient client("hermes.abox");
     if (client.connect() != 0) return 1;
 
-    AudioCore ctrl(&engine);
+    AudioCore ctrl(&engine, gate);
     ctrl.ConnectMsg(ModuleId::AUDIO_CORE);            // SET_MODE → engine mode
 
     // Engage the async buffer pool: one worker per slot on the RK3588 A76 big cores
@@ -121,6 +135,7 @@ int main() {
     hermes_pipeline_stop_async(&engine);
     abox_node_destroy(src);  abox_node_destroy(aec);
     abox_node_destroy(beam); abox_node_destroy(dmx);
+    abox_node_destroy(gate);
     abox_node_destroy(vin);  abox_node_destroy(vout);
     return 0;
 }
