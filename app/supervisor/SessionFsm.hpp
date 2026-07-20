@@ -40,7 +40,7 @@ private:
     void PostSelfEvent(uint16_t id, TriggerPrio prio, const void* body, uint32_t len);
 
     void enter(SessionState s);          // runs entry actions (e.g. SS_FAULT reset)
-    void startTurn();                    // common: open stream + start capture
+    void startTurn(const void* wakeBody = nullptr, uint32_t wakeLen = 0);                    // common: open stream + start capture
 
     // transition actions (emit commands via Send)
     void onReady(const CMsg*);           // SS_INIT        → SS_IDLE        (graph up)

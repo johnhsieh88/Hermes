@@ -16,7 +16,9 @@ NODE="hermes.abox"                       # engine ports: hermes.abox:in_0, in_1,
 command -v pw-link >/dev/null 2>&1 || { echo "error: pipewire tools (pw-link) missing on target"; exit 1; }
 
 echo ">> starting engine ($BIN)  [HERMES_SYNC=1 to force the inline path]"
-"$BIN" &
+# CONVERSATION mode: the CAPGATE silences out_0 in idle mode by design, and this demo
+# wants the mic audible end-to-end. (Default open + conversation gain 1 → passthrough.)
+HERMES_MODE="${HERMES_MODE:-2}" "$BIN" &
 ABOX_PID=$!
 trap 'kill "$ABOX_PID" 2>/dev/null || true' EXIT
 sleep 1.5
@@ -39,5 +41,7 @@ echo ">> linking mic → $NODE → speaker"
 echo ">> path live for ${SECS}s — speak into the mic; you should hear it (~1 block delay)."
 echo "   watch xruns/latency:  pw-top   (look for the '$NODE' row)"
 echo "   (no mic? feed a file:  pw-play --target $NODE file.wav)"
+echo "   STT consumers: launch hermes_llm_connector with HERMES_PW_CAP_TARGET=$NODE"
+echo "   so its capture stream links to $NODE:out_0 (clean feed) instead of the raw mic."
 sleep "$SECS"
 echo ">> done."

@@ -82,6 +82,16 @@ else()
     message(STATUS "Hermes LLM: libcurl not found — LLM will echo input.")
 endif()
 
+# Resident streaming STT: reuse the sherpa-onnx C API found for VTS above.
+if(SHERPA_C_LIB AND SHERPA_C_INC)
+    target_include_directories(hermes_llm_connector PRIVATE ${SHERPA_C_INC})
+    target_link_libraries(hermes_llm_connector PRIVATE ${SHERPA_C_LIB})
+    target_compile_definitions(hermes_llm_connector PRIVATE HERMES_HAVE_SHERPA_ONNX)
+    message(STATUS "Hermes LLM: sherpa-onnx C API found — resident streaming STT enabled.")
+else()
+    message(STATUS "Hermes LLM: sherpa-onnx not found — STT falls back to subprocess.")
+endif()
+
 # ── hermes_abox: ONE PipeWire filter driving the C buffer-pool engine ─────────
 if(PIPEWIRE_FOUND)
     add_executable(hermes_abox

@@ -98,10 +98,14 @@ void Supervisor::enter(SessionState s) {
     }
 }
 
-void Supervisor::startTurn() {
-    fprintf(stderr, "[SUP] startTurn: DISARM→VTS, OPEN_STREAM→LLM, START_CAPTURE→AC\n");
+void Supervisor::startTurn(const void* wakeBody, uint32_t wakeLen) {
+    fprintf(stderr, "[SUP] startTurn: DISARM→VTS, SET_MODE{CONV}→AC, OPEN_STREAM→LLM, START_CAPTURE→AC\n");
     SendMsg(ModuleId::VOICE_TRIGGER,   _VoiceTrigger::cmd::DISARM);
-    SendMsg(ModuleId::LLM_CONNECTOR,   _Llm::cmd::OPEN_STREAM);
+    int mode = 2;  // ABOX_MODE_CONVERSATION — full duplex for the turn (§13.3)
+    SendMsg(ModuleId::AUDIO_CORE,      _AudioCore::cmd::SET_MODE, PRIO_NORMAL, &mode, sizeof mode);
+    // Forward the WakeConfirmedBody (§16.3 preroll contract) so the connector can splice
+    // the ring history in front of the live stream — nullptr for PTT/barge-in entries.
+    SendMsg(ModuleId::LLM_CONNECTOR,   _Llm::cmd::OPEN_STREAM, PRIO_NORMAL, wakeBody, wakeLen);
     SendMsg(ModuleId::AUDIO_CORE,      _AudioCore::cmd::START_CAPTURE);
     enter(SS_CAPTURE);
 }
@@ -113,10 +117,10 @@ void Supervisor::onReady(const CMsg* /*m*/) {
 }
 
 // KEY PATH: keyword wake (§16.5)
-void Supervisor::onWake(const CMsg* /*m*/) {
+void Supervisor::onWake(const CMsg* m) {
     fprintf(stderr, "[SUP] WAKE_CONFIRMED received (state=%s)\n", SessionStateName(state_));
     if (state_ != SS_IDLE) return;
-    startTurn();
+    startTurn(m->pBody, m->hdr.length);        // carry {wake_pos, from_pos, epoch} forward
 }
 
 // KEY PATH: barge-in (§8). The time-critical DUCK is LOCAL in ABOX (§13.3) — the
@@ -162,7 +166,8 @@ void Supervisor::onPlaybackDrained(const CMsg*) {
     if (state_ != SS_SPEAK || !ttsEnded_) return;      // need BOTH signals (§15.3)
     SendMsg(ModuleId::AUDIO_CORE,    _AudioCore::cmd::STOP_TTS);
     SendMsg(ModuleId::AUDIO_CORE,    _AudioCore::cmd::DISARM_BARGE_IN);
-    SendMsg(ModuleId::AUDIO_CORE,    _AudioCore::cmd::SET_MODE);        // → KEYWORD_LISTENING
+    int mode = 0;  // ABOX_MODE_KEYWORD_LISTENING — idle/bypass; body required (§13.3)
+    SendMsg(ModuleId::AUDIO_CORE,    _AudioCore::cmd::SET_MODE, PRIO_NORMAL, &mode, sizeof mode);
     SendMsg(ModuleId::VOICE_TRIGGER, _VoiceTrigger::cmd::ARM);
     enter(SS_IDLE);
 }

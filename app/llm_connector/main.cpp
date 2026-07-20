@@ -1,15 +1,21 @@
 // LLM_CONNECTOR (ModuleId 5) — on-target AI proxy.
-// PipeWire capture (mic) → amplitude VAD → STT (sherpa-onnx subprocess) →
-// LLM (Groq via libcurl) → TTS (Piper subprocess) → PipeWire playback.
+// PipeWire capture (abox out_0 clean mono when HERMES_PW_CAP_TARGET=hermes.abox, else the
+// raw default mic) → AudioRing (RT→worker seam) → resident streaming STT (sherpa-onnx C API;
+// subprocess fallback without it) → amplitude-VAD endpoint → LLM (Groq via libcurl) →
+// TTS (Piper subprocess) → PipeWire playback.
 #include "audio_core/pipewire/Pw.hpp"
+#include "hermes/common/AudioRing.hpp"
 #include "hermes/common/Catalog.hpp"
+#include "hermes/common/Log.h"
 #include "hermes/common/EventMap.hpp"
 #include "hermes/common/ModuleId.hpp"
 #include "hermes/common/MsgBus.hpp"
+#include "hermes/common/PrerollRing.hpp"
 
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -17,16 +23,22 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <fcntl.h>
+#include <sys/mman.h>
 #include <unistd.h>
 #include <vector>
 
 #ifdef HERMES_HAVE_CURL
 #include <curl/curl.h>
 #endif
+#ifdef HERMES_HAVE_SHERPA_ONNX
+#include <sherpa-onnx/c-api/c-api.h>
+#endif
 
 namespace hermes {
 
-static constexpr uint32_t kCaptureRate  = 16000;
+static constexpr uint32_t kCaptureRate  = 48000;  // out_0 native contract (ARCHITECTURE §13.2);
+                                                  // sherpa resamples to its 16 k features itself
 static constexpr float    kSilenceRMS   = 0.008f;
 static constexpr int      kSpeechMinMs  = 400;
 static constexpr int      kSilenceMs    = 900;
@@ -153,8 +165,8 @@ static void json_escape(const std::string& s, std::string& out) {
 static std::string groq_chat(
     const std::string& key,
     const std::string& userText,
-    std::vector<std::pair<std::string,std::string>>& history)
-{
+    const std::vector<std::pair<std::string,std::string>>& history)   // read-only: the caller
+{                                                                     // owns history updates
     std::string msgs = "[{\"role\":\"system\",\"content\":\"";
     json_escape(kSystemPrompt, msgs); msgs += "\"}";
     for (auto& [role, content] : history) {
@@ -198,17 +210,12 @@ static std::string groq_chat(
         }
         reply += *p;
     }
-    if (!reply.empty()) {
-        history.push_back({"user", userText});
-        history.push_back({"assistant", reply});
-        if (history.size() > 20) history.erase(history.begin(), history.begin() + 2);
-    }
     return reply;
 }
 #else
 static std::string groq_chat(
     const std::string&, const std::string& userText,
-    std::vector<std::pair<std::string,std::string>>&)
+    const std::vector<std::pair<std::string,std::string>>&)
 {
     fprintf(stderr, "[CC] libcurl not compiled in — echo: %s\n", userText.c_str());
     return "I heard you say: " + userText;
@@ -253,6 +260,8 @@ public:
 
     void Start() {
         stopping_ = false;
+        initStt();                                     // resident recognizer — loads once here,
+        sttThread_ = std::thread([this]{ sttLoop(); });//   never per-utterance
         monThread_ = std::thread([this]{ monLoop(); });
         vadThread_ = std::thread([this]{ vadLoop(); });
         pwThread_  = std::thread([this]{ pwMain();  });
@@ -260,15 +269,32 @@ public:
 
     void Stop() {
         stopping_ = true;
+        sttCv_.notify_all();
         if (pwClient_) pwClient_->quit();
         if (pwThread_.joinable())  pwThread_.join();
         if (vadThread_.joinable()) vadThread_.join();
         if (monThread_.joinable()) monThread_.join();
+        if (sttThread_.joinable()) sttThread_.join();
+        destroyStt();
     }
 
 private:
-    void onOpen(const CMsg*) {
-        { std::lock_guard<std::mutex> lk(pcmMtx_); pcmBuf_.clear(); }
+    void onOpen(const CMsg* m) {
+        // No ring_.drain() here — rp_ is sttLoop's alone (AudioRing SPSC contract). Stale
+        // idle audio never accumulates anyway: sttLoop discards pops that arrive outside a
+        // turn (see the feed condition there).
+        { std::lock_guard<std::mutex> lk(pcmMtx_);
+          ++turnGen_;                                   // stale pipeline()/finalize become no-ops
+          pcmBuf_.clear(); sttResult_.clear(); sttDone_ = false;
+          backfill_.clear(); }
+        backfillPending_ = false;
+        // PREROLL BACKFILL (§16.3): a wake-entry OPEN_STREAM carries WakeConfirmedBody —
+        // splice the VTS ring history (what the child said OVER the keyword) in front of
+        // the live stream so the utterance is gapless from its true start.
+        if (m && m->pBody && m->hdr.length >= sizeof(WakeConfirmedBody) && sttResident())
+            scheduleBackfill(*static_cast<const WakeConfirmedBody*>(m->pBody));
+        finalizeGen_ = 0;
+        turnSamples_ = 0;
         vadSpeechMs_ = 0; vadSilenceMs_ = 0;
         vadHadSpeech_ = false; vadEndSent_ = false;
         abort_ = false;
@@ -277,23 +303,181 @@ private:
     void onClose(const CMsg*)  { capturing_ = false; }
     void onUttEnd(const CMsg*) {
         capturing_ = false;
-        std::thread([this]{ pipeline(); }).detach();
+        finalizeGen_ = turnGen_.load();                 // tag the finalize with ITS turn —
+        std::thread([this]{ pipeline(); }).detach();    //   sttLoop drops it if a newer turn opened
     }
     void onAbort(const CMsg*) {
         abort_ = true; capturing_ = false; playing_ = false;
+        sttCv_.notify_all();                            // release a pipeline() waiting on finalize
+    }
+
+    // ── Resident streaming STT (sherpa-onnx C API; loads once at Start()) ────
+    void initStt() {
+#ifdef HERMES_HAVE_SHERPA_ONNX
+        char enc[512], dec[512], joi[512], tok[512];
+        snprintf(enc, sizeof enc, "%s/encoder-epoch-99-avg-1.int8.onnx", kSttBase);
+        snprintf(dec, sizeof dec, "%s/decoder-epoch-99-avg-1.int8.onnx", kSttBase);
+        snprintf(joi, sizeof joi, "%s/joiner-epoch-99-avg-1.int8.onnx",  kSttBase);
+        snprintf(tok, sizeof tok, "%s/tokens.txt", kSttBase);
+        SherpaOnnxOnlineRecognizerConfig cfg{};
+        cfg.feat_config.sample_rate         = 16000;   // model feature rate — input arrives at
+        cfg.feat_config.feature_dim         = 80;      //   48 k, sherpa resamples internally
+        cfg.model_config.transducer.encoder = enc;
+        cfg.model_config.transducer.decoder = dec;
+        cfg.model_config.transducer.joiner  = joi;
+        cfg.model_config.tokens             = tok;
+        cfg.model_config.num_threads        = 2;
+        cfg.model_config.provider           = "cpu";
+        cfg.decoding_method                 = "greedy_search";
+        rec_ = SherpaOnnxCreateOnlineRecognizer(&cfg);
+        if (rec_) sttStream_ = SherpaOnnxCreateOnlineStream(rec_);
+        fprintf(stderr, rec_ ? "[CC] resident STT ready (%s)\n"
+                             : "[CC] resident STT init FAILED (%s) — subprocess fallback\n",
+                kSttBase);
+#endif
+    }
+    void destroyStt() {
+#ifdef HERMES_HAVE_SHERPA_ONNX
+        if (sttStream_) { SherpaOnnxDestroyOnlineStream(sttStream_); sttStream_ = nullptr; }
+        if (rec_)       { SherpaOnnxDestroyOnlineRecognizer(rec_);   rec_ = nullptr; }
+#endif
+    }
+    bool sttResident() const {
+#ifdef HERMES_HAVE_SHERPA_ONNX
+        return rec_ != nullptr && sttStream_ != nullptr;
+#else
+        return false;
+#endif
+    }
+
+    // Map VTS's preroll ring read-only (lazy, once). Absent SHM → backfill silently off.
+    PrerollRing* openPreroll() {
+        if (preroll_) return preroll_;
+        int fd = shm_open("/hermes.preroll", O_RDONLY, 0);
+        if (fd < 0) return nullptr;
+        void* pmap = mmap(nullptr, sizeof(PrerollRing), PROT_READ, MAP_SHARED, fd, 0);
+        close(fd);
+        if (pmap == MAP_FAILED) return nullptr;
+        preroll_ = static_cast<PrerollRing*>(pmap);
+        return preroll_;
+    }
+
+    // Copy the [from,to) window (int16 @16 k, VTS position domain) into backfill_ as float.
+    // Runs on the recv thread (non-RT) at turn start; sttLoop feeds it to the recognizer.
+    void scheduleBackfill(const WakeConfirmedBody& w) {
+        PrerollRing* r = openPreroll();
+        if (!r) { HM_LOG_DEBUG("preroll: SHM absent — no backfill"); return; }
+        uint64_t from = 0, to = 0;
+        if (!Preroll_Window(r, w.capture_from_pos, w.epoch, &from, &to) || to <= from) {
+            HM_LOG_WARN("preroll: window invalid (epoch mismatch/xrun) — live-only turn");
+            return;
+        }
+        std::lock_guard<std::mutex> lk(pcmMtx_);
+        backfill_.resize(static_cast<size_t>(to - from));
+        for (uint64_t i = from; i < to; ++i)
+            backfill_[static_cast<size_t>(i - from)] =
+                r->pcm[i % PREROLL_RING_SAMPLES] / 32768.0f;
+        backfillPending_ = true;
+        HM_LOG_INFO("preroll: backfill %llu ms queued (wake_pos=%llu epoch=%u)",
+                    (unsigned long long)((to - from) / 16),      // 16 kHz ring
+                    (unsigned long long)w.wake_pos, w.epoch);
+    }
+
+    // Consumer side of ring_ (single consumer): feed the resident recognizer in ~100 ms
+    // chunks; without sherpa, accumulate int16 for the run_stt() subprocess fallback.
+    // On finalizeReq_ (endpoint) with the ring drained, produce the final transcript.
+    void sttLoop() {
+        float chunk[4800];                               // 100 ms @ 48 k
+        while (!stopping_) {
+            if (backfillPending_.exchange(false)) {      // ring history BEFORE live audio
+#ifdef HERMES_HAVE_SHERPA_ONNX
+                std::vector<float> bf;
+                { std::lock_guard<std::mutex> lk(pcmMtx_); bf = std::move(backfill_); backfill_.clear(); }
+                if (sttResident() && !bf.empty()) {
+                    SherpaOnnxOnlineStreamAcceptWaveform(sttStream_, 16000,   // ring is 16 k
+                                                         bf.data(), (int)bf.size());
+                    while (SherpaOnnxIsOnlineStreamReady(rec_, sttStream_))
+                        SherpaOnnxDecodeOnlineStream(rec_, sttStream_);
+                    turnSamples_.fetch_add(bf.size() * 3, std::memory_order_relaxed); // 48k-equiv
+                }
+#endif
+            }
+            int n = ring_.pop(chunk, 4800);
+            if (n > 0) {
+                // Feed only turn audio: while capturing, or draining the tail toward a
+                // pending finalize. Outside a turn any popped data is stale (e.g. the one
+                // in-flight block that landed after the endpoint) — discard it.
+                if (!capturing_.load(std::memory_order_relaxed) && finalizeGen_.load() == 0)
+                    continue;
+                turnSamples_.fetch_add((uint64_t)n, std::memory_order_relaxed);
+                if (sttResident()) {
+#ifdef HERMES_HAVE_SHERPA_ONNX
+                    SherpaOnnxOnlineStreamAcceptWaveform(sttStream_, (int)kCaptureRate, chunk, n);
+                    while (SherpaOnnxIsOnlineStreamReady(rec_, sttStream_))
+                        SherpaOnnxDecodeOnlineStream(rec_, sttStream_);
+#endif
+                } else {
+                    std::lock_guard<std::mutex> lk(pcmMtx_);
+                    for (int i = 0; i < n; ++i) {
+                        float s = chunk[i];
+                        s = s >  1.0f ?  1.0f : s;
+                        s = s < -1.0f ? -1.0f : s;
+                        pcmBuf_.push_back(static_cast<int16_t>(s * 32767.0f));
+                    }
+                }
+                continue;                                // keep draining while data flows
+            }
+            if (uint32_t g = finalizeGen_.exchange(0)) { // ring empty + endpoint → finalize
+                std::string text;
+                if (sttResident()) {
+#ifdef HERMES_HAVE_SHERPA_ONNX
+                    SherpaOnnxOnlineStreamInputFinished(sttStream_);
+                    while (SherpaOnnxIsOnlineStreamReady(rec_, sttStream_))
+                        SherpaOnnxDecodeOnlineStream(rec_, sttStream_);
+                    const SherpaOnnxOnlineRecognizerResult* r =
+                        SherpaOnnxGetOnlineStreamResult(rec_, sttStream_);
+                    if (r) {
+                        if (r->text) text = r->text;
+                        SherpaOnnxDestroyOnlineRecognizerResult(r);
+                    }
+                    SherpaOnnxOnlineStreamReset(rec_, sttStream_);   // fresh stream, next turn
+#endif
+                }
+                HM_LOG_INFO("turn finalized: %llu ms audio decoded | ring hw=%d ms over=%llu | text %zu B",
+                            (unsigned long long)(turnSamples_.load(std::memory_order_relaxed) / 48),
+                            ring_.highWater() / 48,
+                            (unsigned long long)ring_.overruns(),
+                            text.size());
+                {
+                    std::lock_guard<std::mutex> lk(pcmMtx_);
+                    if (turnGen_.load() == g) {          // only publish into the SAME turn —
+                        sttResult_ = std::move(text);    //   a newer onOpen makes this a no-op
+                        sttDone_ = true;                 //   (stale transcript can't leak)
+                    }
+                }
+                sttCv_.notify_all();
+                continue;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
     }
 
     void vadLoop() {
         int logTick = 0;
         while (!stopping_) {
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            if (++logTick >= 40) {  // every 2s
+            if (++logTick >= 40) {  // every 2s — the buffering health line
                 logTick = 0;
-                fprintf(stderr, "[CC] vad: capturing=%d rms=%.4f calls=%llu pcm=%zu\n",
-                        (int)capturing_.load(),
-                        rms_.load(std::memory_order_relaxed),
-                        (unsigned long long)captureCallCount_.load(),
-                        [&]{ std::lock_guard<std::mutex> lk(pcmMtx_); return pcmBuf_.size(); }());
+                const int avail = ring_.available();
+                HM_LOG_DEBUG("vad: capturing=%d rms=%.4f calls=%llu | ring %d smp (%d ms, %d%% of %d ms cap) hw=%d ms over=%llu",
+                             (int)capturing_.load(),
+                             rms_.load(std::memory_order_relaxed),
+                             (unsigned long long)captureCallCount_.load(),
+                             avail, avail / 48,
+                             avail * 100 / ring_.capacity(),
+                             ring_.capacity() / 48,
+                             ring_.highWater() / 48,
+                             (unsigned long long)ring_.overruns());
             }
             if (!capturing_ || vadEndSent_) continue;
             float rms = rms_.load(std::memory_order_relaxed);
@@ -315,42 +499,71 @@ private:
     }
 
     void pipeline() {
+        // One detached thread per turn. myGen makes a superseded thread inert: every stage
+        // gate checks it, and no shared state (sttResult_/history_/ttsWav_) is touched once
+        // a newer onOpen() has bumped turnGen_.
+        const uint32_t myGen = turnGen_.load();
+        // Transcript source, in priority order: test stub → resident STT (sttLoop finalize
+        // handshake) → run_stt() subprocess fallback on the pcm sttLoop accumulated.
+        std::string transcript;
         std::vector<int16_t> pcm;
-        { std::lock_guard<std::mutex> lk(pcmMtx_); pcm = pcmBuf_; }
-        fprintf(stderr, "[CC] pipeline: pcmBuf=%zu samples (%.1fs), abort=%d\n",
-                pcm.size(), pcm.size() / (float)kCaptureRate, (int)abort_.load());
-        if (pcm.empty() || abort_) {
-            fprintf(stderr, "[CC] pipeline: aborting early (empty=%d abort=%d)\n",
-                    pcm.empty(), (int)abort_.load());
-            if (pcm.empty())
-                SendMsg(ModuleId::SUPERVISOR, _Llm::evt::STT_NO_SPEECH, PRIO_NORMAL);
-            abort_ = false; return;
+        const char* stub = getenv("HERMES_TEST_UTTERANCE");
+        if (stub && *stub) {
+            fprintf(stderr, "[CC] STT stub: '%s'\n", stub);
+            transcript = stub;
+        } else {
+            std::unique_lock<std::mutex> lk(pcmMtx_);
+            // QEMU decodes ~4.5× slower than real time — allow the backlog to drain.
+            sttCv_.wait_for(lk, std::chrono::seconds(60),
+                            [&]{ return sttDone_ || abort_.load() || stopping_.load()
+                                     || turnGen_.load() != myGen; });
+            if (stopping_.load() || turnGen_.load() != myGen) return;   // shutdown / superseded
+            transcript = std::move(sttResult_); sttResult_.clear(); sttDone_ = false;
+            pcm = std::move(pcmBuf_); pcmBuf_.clear();
         }
-
-        std::string transcript = run_stt(pcm, kCaptureRate);
+        if (abort_) { abort_ = false; return; }
+        if (transcript.empty() && !pcm.empty())
+            transcript = run_stt(pcm, kCaptureRate);         // no-sherpa fallback path
         fprintf(stderr, "[CC] transcript: '%s'\n", transcript.c_str());
         if (transcript.empty() || abort_) {
             SendMsg(ModuleId::SUPERVISOR, _Llm::evt::STT_NO_SPEECH, PRIO_NORMAL);
             abort_ = false; return;
         }
-        SendMsg(ModuleId::SUPERVISOR, _Llm::evt::STT_FINAL, PRIO_NORMAL,
-                transcript.c_str(), (uint32_t)transcript.size());
-        if (abort_) { abort_ = false; return; }
+        SendMsg(ModuleId::STORY_AGENT, _Llm::evt::STT_FINAL, PRIO_NORMAL,
+                transcript.c_str(), (uint32_t)transcript.size());   // §16.2: story_agent consumes
+        if (abort_ || turnGen_.load() != myGen) { abort_ = false; return; }
 
-        std::string reply = groq_chat(apiKey_, transcript, history_);
+        // history_ is copied under the lock for the request, and updated under the lock
+        // (gen-gated) after — groq_chat itself no longer mutates shared state, so a stale
+        // thread stuck in curl can never corrupt the vector a newer turn is using.
+        std::vector<std::pair<std::string, std::string>> hist;
+        { std::lock_guard<std::mutex> lk(pcmMtx_); hist = history_; }
+        std::string reply = groq_chat(apiKey_, transcript, hist);
         fprintf(stderr, "[CC] reply: %s\n", reply.c_str());
         if (reply.empty() || abort_) {
             SendMsg(ModuleId::SUPERVISOR, _Llm::evt::LLM_ERROR, PRIO_NORMAL);
             abort_ = false; return;
         }
+        {
+            std::lock_guard<std::mutex> lk(pcmMtx_);
+            if (turnGen_.load() == myGen) {
+                history_.push_back({"user", transcript});
+                history_.push_back({"assistant", reply});
+                if (history_.size() > 20) history_.erase(history_.begin(), history_.begin() + 2);
+            }
+        }
 
         WavPcm wav = run_tts(reply);
         if (wav.f32.empty() || abort_) { abort_ = false; return; }
 
-        ttsWav_  = std::move(wav.f32);
-        ttsRate_ = wav.rate;
-        ttsOffset_.store(0, std::memory_order_relaxed);
-
+        {   // install playback only if this is still the live turn (onOpen holds the same
+            // lock while bumping turnGen_, so a stale install can't slip past the check)
+            std::lock_guard<std::mutex> lk(pcmMtx_);
+            if (turnGen_.load() != myGen) return;
+            ttsWav_  = std::move(wav.f32);
+            ttsRate_ = wav.rate;
+            ttsOffset_.store(0, std::memory_order_relaxed);
+        }
         SendMsg(ModuleId::SUPERVISOR, _Llm::evt::TTS_CHUNK,      PRIO_NORMAL);
         SendMsg(ModuleId::SUPERVISOR, _Llm::evt::TTS_STREAM_END,  PRIO_NORMAL);
         playing_.store(true, std::memory_order_release);
@@ -386,6 +599,7 @@ private:
         pwClient_->run();
     }
 
+    // PW RT thread — one lock-free push, nothing else (no mutex, no alloc on the RT path).
     static void s_capture(void* u, float* samples, uint32_t nf, uint32_t) {
         auto& self = *static_cast<LlmConnector*>(u);
         self.captureCallCount_.fetch_add(1, std::memory_order_relaxed);
@@ -393,13 +607,7 @@ private:
         for (uint32_t i = 0; i < nf; ++i) rms += samples[i] * samples[i];
         self.rms_.store(std::sqrt(rms / (float)nf), std::memory_order_relaxed);
         if (!self.capturing_.load(std::memory_order_relaxed)) return;
-        std::lock_guard<std::mutex> lk(self.pcmMtx_);
-        for (uint32_t i = 0; i < nf; ++i) {
-            float s = samples[i];
-            s = s >  1.0f ?  1.0f : s;
-            s = s < -1.0f ? -1.0f : s;
-            self.pcmBuf_.push_back(static_cast<int16_t>(s * 32767.0f));
-        }
+        self.ring_.push(samples, (int)nf);   // drop-new + counter on overflow, never blocks
     }
 
     static void s_playback(void* u, float* samples, uint32_t nf, uint32_t) {
@@ -421,8 +629,24 @@ private:
     std::atomic<bool>    abort_{false};
     std::atomic<float>   rms_{0.0f};
     std::atomic<uint64_t> captureCallCount_{0};
-    std::mutex           pcmMtx_;
-    std::vector<int16_t> pcmBuf_;
+
+    AudioRing<96000>     ring_;               // 2 s @ 48 k — the RT-capture → sttLoop seam
+#ifdef HERMES_HAVE_SHERPA_ONNX
+    const SherpaOnnxOnlineRecognizer* rec_{nullptr};
+    const SherpaOnnxOnlineStream*     sttStream_{nullptr};
+#endif
+    std::mutex           pcmMtx_;             // guards pcmBuf_/sttResult_/sttDone_ (worker side
+    std::vector<int16_t> pcmBuf_;             //   only — the RT callback never takes it now)
+    std::condition_variable sttCv_;           // finalize handshake: sttLoop → pipeline()
+    std::atomic<uint32_t> turnGen_{0};        // bumped by onOpen (under pcmMtx_); stale turns'
+    std::atomic<uint32_t> finalizeGen_{0};    //   threads/finalizes gate on it. 0 = no finalize
+    std::atomic<uint64_t> turnSamples_{0};    // samples fed to STT this turn (48 k-equivalent)
+    PrerollRing*         preroll_{nullptr};   // VTS ring, mapped read-only (lazy)
+    std::vector<float>   backfill_;           // pre-wake history to splice (guarded by pcmMtx_)
+    std::atomic<bool>    backfillPending_{false};
+    bool                 sttDone_{false};     // guarded by pcmMtx_
+    std::string          sttResult_;          // guarded by pcmMtx_
+    std::thread          sttThread_;
 
     std::atomic<bool>    playing_{false};
     std::vector<float>   ttsWav_;
