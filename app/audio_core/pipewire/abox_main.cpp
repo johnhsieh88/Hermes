@@ -39,6 +39,12 @@ private:
         if (m->pBody && m->hdr.length >= sizeof(int)) {
             const int v = *static_cast<const int*>(m->pBody);   // EngineMode == abox_mode values
             hermes_pipeline_set_mode(eng_, static_cast<abox_mode>(v));
+            HM_LOG_INFO("SET_MODE → %d (mask latches next block)", v);
+            // Ack with MODE_CHANGED (§12.2 0x28B): the mode machine's reply half. Runs on
+            // the MsgBus recv thread (non-RT) — this is what un-strands SS_BARGE_DUCK
+            // (Supervisor::onModeChanged is its only exit) once a BARGE_IN producer exists.
+            SendMsg(ModuleId::SUPERVISOR, _AudioCore::evt::MODE_CHANGED, PRIO_NORMAL,
+                    &v, sizeof v);
         }
     }
     void onSetVolume(const CMsg* m) {

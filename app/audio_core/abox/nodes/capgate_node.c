@@ -14,15 +14,22 @@
 #include <stdatomic.h>
 
 typedef struct {
-    _Atomic int open;       /* runtime command state: 1 = capture allowed */
-    float       g;          /* last applied gain (ramp start for the next block) */
+    _Atomic int   open;     /* runtime command state: 1 = capture allowed */
+    /* Last applied gain. ATOMIC because the async buffer pool runs 2 worker threads that
+     * can execute process() on this SAME node for two in-flight periods concurrently
+     * (buffer_pipeline.c bp_slot_worker) — a plain float here is a data race. Relaxed is
+     * enough: the value only ramps between the exact endpoints 0/1, both workers compute
+     * the same target from the same inputs, and a lost intermediate merely restarts a
+     * ≤5 ms ramp. (Same hazard class exists for any stateful node under the async pool —
+     * SRC's phase carry, AEC's mix ramp — tracked in ARCHITECTURE §22.) */
+    _Atomic float g;
 } capgate_state;
 
 static void capgate_process(abox_node* n, abox_frame* io) {
     capgate_state* s = (capgate_state*)n->state;
     const float target = abox_route_gain(io->mode, ABOX_ELEM_CAPGATE) *
                          (atomic_load_explicit(&s->open, memory_order_acquire) ? 1.0f : 0.0f);
-    const float start = s->g;
+    const float start = atomic_load_explicit(&s->g, memory_order_relaxed);
     if (start == target) {
         if (target == 1.0f) return;                    /* fully open: identity, zero work */
         if (target == 0.0f) {                          /* fully closed: silence the frame */
@@ -38,12 +45,12 @@ static void capgate_process(abox_node* n, abox_frame* io) {
         float g = start;
         for (int i = 0; i < io->frames; ++i) { g += step; io->chan[c][i] *= g; }
     }
-    s->g = target;
+    atomic_store_explicit(&s->g, target, memory_order_relaxed);
 }
 
 static void capgate_reset(abox_node* n) {
     capgate_state* s = (capgate_state*)n->state;
-    s->g = 0.0f;
+    atomic_store_explicit(&s->g, 0.0f, memory_order_relaxed);
 }
 
 static const abox_node_ops CAPGATE_OPS = {
@@ -57,7 +64,7 @@ abox_node* abox_capgate_create(void) {
         n->name = "capgate";
         capgate_state* s = (capgate_state*)n->state;
         atomic_store_explicit(&s->open, 1, memory_order_release);  /* default open */
-        s->g = 1.0f;
+        atomic_store_explicit(&s->g, 1.0f, memory_order_relaxed);
     }
     return n;
 }

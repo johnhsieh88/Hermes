@@ -1418,6 +1418,15 @@ WirePlumber link policy on the target image, optional mem0-at-scale & multi-devi
 7. **OKF v0.1 may churn**; **mem0 in/out** default *out* at scale; **consolidation trigger** (good
    night vs idle timer vs session end) — open.
 8. **No init/systemd supervision** of the process fleet yet; launch is script-driven.
+9. **Async-pool concurrency vs. stateful nodes (2026-07-20 review finding).** The async
+   buffer pool runs 2 worker threads that can execute the SAME node instance's `process()`
+   for two in-flight periods concurrently. CAPGATE's gain is atomic (fixed; residual = a
+   rare transition-block ramp restart — the fully order-independent design is a
+   position-anchored gain, noted in the node source); but **SRC's phase-carry/`last[]`
+   state and AEC's mix ramp are plain fields** — a data race the moment those kernels do
+   real work under the async path. Options when it matters: per-slot node state, a single
+   graph-worker, or `HERMES_SYNC=1`. Benign today only because AEC is a stub and SRC runs
+   the stateless ratio-1.0 fast path.
 
 ---
 

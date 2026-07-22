@@ -308,6 +308,8 @@ private:
     }
     void onAbort(const CMsg*) {
         abort_ = true; capturing_ = false; playing_ = false;
+        finalizeGen_ = 0;                               // cancel any pending finalize order
+        sttResetReq_ = true;                            // sttLoop discards the dirty stream state
         sttCv_.notify_all();                            // release a pipeline() waiting on finalize
     }
 
@@ -368,8 +370,9 @@ private:
         PrerollRing* r = openPreroll();
         if (!r) { HM_LOG_DEBUG("preroll: SHM absent — no backfill"); return; }
         uint64_t from = 0, to = 0;
-        if (!Preroll_Window(r, w.capture_from_pos, w.epoch, &from, &to) || to <= from) {
-            HM_LOG_WARN("preroll: window invalid (epoch mismatch/xrun) — live-only turn");
+        if (!Preroll_Window(r, w.capture_from_pos, w.epoch, &from, &to) || to <= from ||
+            to - from > (uint64_t)PREROLL_RING_SAMPLES) {   // sanity: never trust > ring size
+            HM_LOG_WARN("preroll: window invalid (epoch mismatch/xrun/range) — live-only turn");
             return;
         }
         std::lock_guard<std::mutex> lk(pcmMtx_);
@@ -389,6 +392,14 @@ private:
     void sttLoop() {
         float chunk[4800];                               // 100 ms @ 48 k
         while (!stopping_) {
+            if (sttResetReq_.exchange(false)) {          // ABORT mid-capture: the stream holds
+#ifdef HERMES_HAVE_SHERPA_ONNX
+                if (sttResident())                       // partial never-finalized state — drop
+                    SherpaOnnxOnlineStreamReset(rec_, sttStream_);   // it so the NEXT turn
+#endif
+                { std::lock_guard<std::mutex> lk(pcmMtx_); pcmBuf_.clear(); backfill_.clear(); }
+                backfillPending_ = false;                // starts from a clean recognizer
+            }
             if (backfillPending_.exchange(false)) {      // ring history BEFORE live audio
 #ifdef HERMES_HAVE_SHERPA_ONNX
                 std::vector<float> bf;
@@ -644,6 +655,7 @@ private:
     PrerollRing*         preroll_{nullptr};   // VTS ring, mapped read-only (lazy)
     std::vector<float>   backfill_;           // pre-wake history to splice (guarded by pcmMtx_)
     std::atomic<bool>    backfillPending_{false};
+    std::atomic<bool>    sttResetReq_{false};  // ABORT → sttLoop resets the recognizer stream
     bool                 sttDone_{false};     // guarded by pcmMtx_
     std::string          sttResult_;          // guarded by pcmMtx_
     std::thread          sttThread_;
