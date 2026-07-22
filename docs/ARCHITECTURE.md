@@ -972,7 +972,7 @@ this slice · ⚠ partial · ⛔ pending.
 | 4 | out_0 → connector | f32 mono 48 k | 240 fr, same cycle | PW link (`node.target`, WirePlumber) | `Pw.cpp:187` | 🆕 |
 | 5 | RT → worker | f32 samples | push 5 ms / pop 100 ms | `AudioRing<96000>` lock-free SPSC | `AudioRing.hpp` | 🆕 |
 | 6 | audio → **string** | PCM → UTF-8 transcript | streaming, final ~ms after endpoint | resident sherpa zipformer (loads once at `Start()`) | `llm_connector` `sttLoop` | 🆕 |
-| 7 | wake pointer | `{wake_pos,from_pos,epoch}` 20 B | per wake | CMsg on mq — a *pointer into the past*, never samples | `PrerollRing.hpp` | ✅ sent / ⛔ read |
+| 7 | wake pointer | `{wake_pos,from_pos,epoch}` 20 B | per wake | CMsg on mq — a *pointer into the past*, never samples | `PrerollRing.hpp` | ✅ sent + consumed 🆕 |
 | 8 | turn control | CMsg ids (§12) | 20–276 B | POSIX mq, 3 prio lanes | `MsgBus.cpp` | ✅ |
 | 9 | **string → cloud** | transcript in JSON | one HTTPS request | connector's TLS socket (libcurl) — *the only network hop* | `groq_chat()` | ✅ |
 | 10 | reply → PCM | text → f32 22.05 k | per reply | Piper subprocess | `run_tts()` | ⚠ |
@@ -1068,6 +1068,23 @@ the network; the network carries only strings; bulk audio moves exclusively by s
 `AudioRing` (≤2 s transit, normally ~10 ms) · sherpa decoder state (features, not PCM) ·
 `ttsWav_` (one reply, until drained). Nothing else holds samples; there is no disk in the live
 path (the `/tmp` WAV exists only in the no-sherpa fallback).
+
+**The preroll ring — as-built design (v0.3).** *Problem:* the keyword is confirmed ~200 ms
+after it ended, and the child keeps talking over it — capture-from-the-wake clips the front
+of the question. *Solution:* VTS writes its raw 16 k mic tap into `/hermes.preroll`
+continuously (SHM, 3 s **moving window**, overwrite-oldest, `writePos` absolute sample
+positions + `epoch` reset token — `PrerollRing.hpp`). The wake event carries only a
+**pointer into that past**: `{wake_pos, capture_from_pos, epoch}` (40 B; the samples never
+touch the bus). The supervisor forwards the body through `OPEN_STREAM`; the **llm_connector**
+maps the ring read-only, validates the window (`Preroll_Window` — epoch guard + size sanity;
+any failure ⇒ `<WARN>` + live-only turn), and **backfills** the history into the resident
+recognizer *before* live audio (16 k feed; sherpa resamples per call) — the utterance is
+gapless from its true start. Producer-side underflow is clamped in VTS
+(`from = pos > 3 s ? pos − 3 s : 0`). *Divergence from Part II §16.3:* the SDS designed
+ABOX as the ring's consumer ("rewind into it, run DSP over pre-roll ⧺ live"); as-built the
+consumer is the **connector's STT** — the pre-roll is idle-period audio (echo-free by
+definition), so skipping the DSP pass over it loses nothing AEC would have added. Part I
+precedence applies.
 
 **Known gaps this section makes visible** (tracked in §21/§22 — updated 2026-07-20 after the
 Tier-1 batch): ~~`STT_FINAL` unrouted~~ → now delivered to `story_agent` ✅; ~~CAPGATE
