@@ -309,19 +309,31 @@ static int serve(GuiBridge& bus, const std::string& samplesDir, int port) {
             if (req.size() > (1 << 20)) break;  // 1 MB guard
         }
         std::string body;
+        bool tooLarge = false;
         if (header_end != std::string::npos) {
             size_t cl = 0, p = req.find("Content-Length:");
             if (p != std::string::npos) cl = std::strtoul(req.c_str() + p + 15, nullptr, 10);
-            body = req.substr(header_end + 4);
-            while (body.size() < cl && (r = read(c, buf, sizeof(buf))) > 0)
-                body.append(buf, static_cast<size_t>(r));
+            // Clamp BEFORE reading: a spoofed huge Content-Length must not grow `body`
+            // without bound (remote OOM). 10 MB is the STT cap; nothing else comes close.
+            static constexpr size_t kMaxBody = 10 * 1024 * 1024;
+            if (cl > kMaxBody) {
+                tooLarge = true;
+            } else {
+                body = req.substr(header_end + 4);
+                while (body.size() < cl && body.size() <= kMaxBody &&
+                       (r = read(c, buf, sizeof(buf))) > 0)
+                    body.append(buf, static_cast<size_t>(r));
+            }
         }
 
         std::string method = req.substr(0, req.find(' '));
         size_t ps = req.find(' ') + 1;
         std::string path = req.substr(ps, req.find(' ', ps) - ps);
 
-        if (method == "GET" && (path == "/" || path == "/index.html")) {
+        if (tooLarge) {
+            send_resp(c, "413 Payload Too Large", "application/json",
+                      "{\"ok\":false,\"err\":\"body exceeds 10MB\"}");
+        } else if (method == "GET" && (path == "/" || path == "/index.html")) {
             send_resp(c, "200 OK", "text/html; charset=utf-8", kGuiHtml);
         } else if (method == "GET" && path == "/api/samples") {
             send_resp(c, "200 OK", "application/json", samples_json(samplesDir));
@@ -335,7 +347,22 @@ static int serve(GuiBridge& bus, const std::string& samplesDir, int port) {
                           "{\"ok\":false,\"err\":\"body must be 44B–10MB WAV\"}");
             } else {
                 const char* wav = "/tmp/hermes_stt_input.wav";
-                if (FILE* f = fopen(wav, "wb")) { fwrite(body.data(), 1, body.size(), f); fclose(f); }
+                FILE* wf = fopen(wav, "wb");
+                if (!wf) {   // MUST bail: falling through would transcribe the PREVIOUS file
+                    send_resp(c, "500 Internal Server Error", "application/json",
+                              "{\"ok\":false,\"err\":\"cannot write temp wav\"}");
+                    close(c);
+                    continue;
+                }
+                size_t wr = fwrite(body.data(), 1, body.size(), wf);
+                fclose(wf);
+                if (wr != body.size()) {   // short write (disk full) — same stale-file hazard
+                    unlink(wav);
+                    send_resp(c, "500 Internal Server Error", "application/json",
+                              "{\"ok\":false,\"err\":\"short write\"}");
+                    close(c);
+                    continue;
+                }
                 char note[128];
                 std::snprintf(note, sizeof(note), "STT: running sherpa-onnx on %.1f s WAV…",
                               static_cast<double>(body.size() - 44) / (2.0 * 16000));

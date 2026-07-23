@@ -93,7 +93,7 @@ R"HTML(<!doctype html>
       <span id="recStatus" style="color:var(--mut);font-size:12px;padding:0 12px">idle — click Record, speak, click again to transcribe</span>
     </div>
     <div id="transcript" style="margin-top:10px;padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:7px;min-height:36px;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;color:#c9d1d9"></div>
-    <p class="hint">Browser mic → WAV → target sherpa-onnx (streaming zipformer 20M int8). QEMU: ~4s model load + 4.5× RT inference per clip.</p>
+    <p class="hint">Browser mic → WAV → target sherpa-onnx (streaming zipformer 20M int8). QEMU: ~4s model load + 4.5× RT inference per clip. Mic needs a secure context: open via localhost / SSH port-forward (plain http://<ip> blocks getUserMedia).</p>
   </section>
 
   <section class="card full" id="log">
