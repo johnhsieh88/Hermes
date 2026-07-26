@@ -165,8 +165,11 @@ fallback:
         using namespace pw;
         pwClient_ = std::make_unique<PwClient>("hermes-voice-trigger");
         if (pwClient_->connect() < 0) { fprintf(stderr, "[VTS] PipeWire connect failed\n"); return; }
+        const char* target = getenv("HERMES_PW_VTS_TARGET");
+        if (!target) target = "hermes.abox";   // tap ABOX processed output, not raw mic
         micStream_ = std::make_unique<PwStream>(*pwClient_, "hermes-vts-mic",
-                                                PwStream::CAPTURE, &VoiceTrigger::s_mic, this);
+                                                PwStream::CAPTURE, &VoiceTrigger::s_mic, this,
+                                                target);
         micStream_->connect(kMicRate);
         pwClient_->run();
     }

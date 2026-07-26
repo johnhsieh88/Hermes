@@ -1,7 +1,8 @@
-/* aec_node.c — AEC (§4.3 PBFDAF): mode-adaptive ramped bypass that pulls the time-
- * aligned, post-fader far-end from the reference manager (§4.3.2). The real partitioned-
- * block frequency-domain echo-cancellation kernel + DTD freeze are TODO; the framework
- * (mode ramp, reference pull, per-channel structure) is in place. */
+/* aec_node.c — AEC bypass stub used when libwebrtc-audio-processing is unavailable.
+ * When HERMES_HAVE_WEBRTC_AP is defined, aec_webrtc.cpp provides abox_aec_create()
+ * and abox_aec_set_ref() instead; this file compiles to an empty translation unit. */
+#ifndef HERMES_HAVE_WEBRTC_AP
+
 #include "audio_core/abox/abox_nodes.h"
 #include "audio_core/abox/nodes/node_common.h"
 
@@ -52,3 +53,5 @@ void abox_aec_set_ref(abox_node* aec, abox_ref_manager* ref) {
     if (aec && aec->ops == &AEC_OPS && aec->state)
         ((aec_state*)aec->state)->ref = ref;
 }
+
+#endif /* HERMES_HAVE_WEBRTC_AP */

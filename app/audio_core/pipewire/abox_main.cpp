@@ -14,8 +14,13 @@
 #include "hermes/common/EventMap.hpp"
 #include "hermes/common/ModuleId.hpp"
 #include "hermes/common/MsgBus.hpp"
+#include "hermes/common/TtsRefRing.hpp"
 #include <cstdlib>
 #include <cstring>
+#include <cstdio>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <unistd.h>
 
 namespace hermes {
 
@@ -63,14 +68,61 @@ private:
 
 } // namespace hermes
 
-// The per-quantum bridge (the one pw_* → C engine boundary). PipeWire hands mono channel
-// pointers + frame count + sample timeline; the coordinator does the buffer-pool firewall,
-// the mask-gated cascade, and the egress copy.
-static void abox_block(void* user, const float* const* in, int chIn,
-                       float* const* out, int chOut, uint32_t n, uint64_t samplePos) {
-    auto* eng = static_cast<hermes_buffered_pipeline*>(user);
-    hermes_pipeline_process_tick(eng, in, chIn, out, chOut, static_cast<int>(n), samplePos);
-}
+// Context bundled into the PipeWire callback user pointer.
+struct AboxCtx {
+    hermes_buffered_pipeline* eng    = nullptr;
+    abox_ref_manager*         ref    = nullptr;
+    hermes::TtsRefRing*       ttsref = nullptr;
+    float ref_phase = 0.0f;   // cross-block phase carry for 22050→48000 SRC
+    float ref_last  = 0.0f;   // last read sample — used to pad a starved ring
+
+    // Ratio of input (22050 Hz) to output (48000 Hz) sample rates.
+    static constexpr float kRefRatio = 22050.0f / 48000.0f;
+
+    // The one pw_filter → C engine boundary. Per-quantum, RT thread.
+    // Reads TTS reference from shm ring, resamples to 48 kHz, populates the AEC
+    // ref manager, then hands control to the DSP pipeline.
+    static void process(void* user, const float* const* in, int chIn,
+                        float* const* out, int chOut, uint32_t n, uint64_t samplePos) {
+        auto& self = *static_cast<AboxCtx*>(user);
+
+        if (self.ttsref) {
+            // For n output samples at 48 kHz, consume ≈ n * kRefRatio input samples
+            // from the 22050 Hz ring. +2 gives one extra sample for interpolation plus
+            // one guard against floating-point rounding.
+            int needed = static_cast<int>(self.ref_phase + static_cast<float>(n) * kRefRatio) + 2;
+            if (needed > 128) needed = 128;   // quantum is locked at 240; needed ≤ 113 normally
+
+            float raw[128];
+            int got = hermes::TtsRef_Read(self.ttsref, raw, needed);
+            // Pad with the last known sample if the ring is temporarily starved
+            // (e.g. TTS hasn't started yet). AEC will see a flat tail, not random noise.
+            for (int i = got; i < needed; ++i) raw[i] = self.ref_last;
+            if (got > 0) self.ref_last = raw[got - 1];
+
+            // Linear interpolation: for each 48 kHz output index i, the fractional
+            // position in the 22050 Hz input is ph = ref_phase + i * kRefRatio.
+            float ref_out[256];   // 256 ≥ 240 (max quantum)
+            float ph = self.ref_phase;
+            for (uint32_t i = 0; i < n; ++i) {
+                int   j  = static_cast<int>(ph);
+                float fr = ph - static_cast<float>(j);
+                float a  = (j   < needed) ? raw[j]   : self.ref_last;
+                float b  = (j+1 < needed) ? raw[j+1] : self.ref_last;
+                ref_out[i] = a + (b - a) * fr;
+                ph += kRefRatio;
+            }
+            // Carry only the fractional part to the next block.
+            float final_ph = self.ref_phase + static_cast<float>(n) * kRefRatio;
+            self.ref_phase = final_ph - static_cast<float>(static_cast<int>(final_ph));
+
+            abox_ref_write_farend(self.ref, ref_out, nullptr, static_cast<int>(n));
+        }
+
+        hermes_pipeline_process_tick(self.eng, in, chIn, out, chOut,
+                                     static_cast<int>(n), samplePos);
+    }
+};
 
 int main() {
     using namespace hermes;
@@ -131,14 +183,37 @@ int main() {
     if (const char* ms = std::getenv("HERMES_MODE"))
         hermes_pipeline_set_mode(&engine, static_cast<abox_mode>(std::atoi(ms)));
 
+    // Open the TTS reference ring (written by LLM_CONNECTOR s_playback). Both
+    // processes use O_CREAT so startup order doesn't matter; fresh shm pages are
+    // zero-initialised which matches the ring's idle wp=rp=0 state.
+    static AboxCtx ctx;
+    ctx.eng = &engine;
+    ctx.ref = &ref;
+    {
+        int fd = shm_open("/hermes.ttsref", O_CREAT | O_RDWR, 0600);
+        if (fd >= 0) {
+            ftruncate(fd, sizeof(hermes::TtsRefRing));
+            void* p = mmap(nullptr, sizeof(hermes::TtsRefRing),
+                           PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+            close(fd);
+            ctx.ttsref = (p == MAP_FAILED) ? nullptr
+                                           : static_cast<hermes::TtsRefRing*>(p);
+        }
+        if (!ctx.ttsref) fprintf(stderr, "[ABOX] ttsref shm unavailable — AEC ref disabled\n");
+    }
+
     // ONE pw_filter: 2 mic-in, 1 mono-out; on_process walks the whole C graph (Model B).
-    // Links (mic→hermes.abox→sink) are created by the init process / WirePlumber.
-    auto node = pw::create_pw_node(client, "hermes.abox", 2, 1, &abox_block, &engine, 48000, 240);
+    // VTS and LLM_CONNECTOR capture streams target "hermes.abox" so WirePlumber links
+    // this filter's out_0 to their input ports. in_1 (TTS ref) is fed via the ttsref
+    // shm ring rather than a PipeWire link to avoid WirePlumber routing rules.
+    auto node = pw::create_pw_node(client, "hermes.abox", 2, 1,
+                                   &AboxCtx::process, &ctx, 48000, 240);
     if (!node) { hermes_pipeline_stop_async(&engine); return 3; }
 
     client.run();   // PipeWire data-loop; the MsgBus recv thread drives the mode concurrently
 
     hermes_pipeline_stop_async(&engine);
+    if (ctx.ttsref) munmap(ctx.ttsref, sizeof(hermes::TtsRefRing));
     abox_node_destroy(src);  abox_node_destroy(aec);
     abox_node_destroy(beam); abox_node_destroy(dmx);
     abox_node_destroy(gate);

@@ -11,6 +11,7 @@
 #include "hermes/common/ModuleId.hpp"
 #include "hermes/common/MsgBus.hpp"
 #include "hermes/common/PrerollRing.hpp"
+#include "hermes/common/TtsRefRing.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -19,9 +20,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fcntl.h>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <sys/mman.h>
 #include <thread>
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -262,6 +265,7 @@ public:
         stopping_ = false;
         initStt();                                     // resident recognizer — loads once here,
         sttThread_ = std::thread([this]{ sttLoop(); });//   never per-utterance
+        ttsref_    = openTtsRef();
         monThread_ = std::thread([this]{ monLoop(); });
         vadThread_ = std::thread([this]{ vadLoop(); });
         pwThread_  = std::thread([this]{ pwMain();  });
@@ -276,6 +280,7 @@ public:
         if (monThread_.joinable()) monThread_.join();
         if (sttThread_.joinable()) sttThread_.join();
         destroyStt();
+        if (ttsref_) { munmap(ttsref_, sizeof(hermes::TtsRefRing)); ttsref_ = nullptr; }
     }
 
 private:
@@ -595,9 +600,10 @@ private:
         if (pwClient_->connect() < 0) {
             fprintf(stderr, "[CC] PipeWire connect failed\n"); return;
         }
-        // Allow overriding PW targets via env for QEMU test environments where
-        // the virtio ALSA card is suspended. On real hardware, leave unset.
+        // Capture from ABOX processed output (AEC-cleaned mic). Override via env
+        // for QEMU environments where hermes.abox may not be running.
         const char* capTarget  = getenv("HERMES_PW_CAP_TARGET");
+        if (!capTarget) capTarget = "hermes.abox";
         const char* playTarget = getenv("HERMES_PW_PLAY_TARGET");
         capStream_  = std::make_unique<PwStream>(*pwClient_, "hermes-cc-mic",
                                                  PwStream::CAPTURE,  &LlmConnector::s_capture,  this,
@@ -624,17 +630,37 @@ private:
     static void s_playback(void* u, float* samples, uint32_t nf, uint32_t) {
         auto& self = *static_cast<LlmConnector*>(u);
         if (!self.playing_.load(std::memory_order_acquire)) {
-            std::memset(samples, 0, nf * sizeof(float)); return;
+            std::memset(samples, 0, nf * sizeof(float));
+        } else {
+            size_t off = self.ttsOffset_.load(std::memory_order_relaxed);
+            size_t rem = self.ttsWav_.size() - off;
+            uint32_t toCopy = (rem < nf) ? (uint32_t)rem : nf;
+            std::memcpy(samples, self.ttsWav_.data() + off, toCopy * sizeof(float));
+            if (toCopy < nf) std::memset(samples + toCopy, 0, (nf - toCopy) * sizeof(float));
+            self.ttsOffset_.store(off + toCopy, std::memory_order_release);
+            if (off + toCopy >= self.ttsWav_.size())
+                self.drainPending_.store(true, std::memory_order_release);
         }
-        size_t off = self.ttsOffset_.load(std::memory_order_relaxed);
-        size_t rem = self.ttsWav_.size() - off;
-        uint32_t toCopy = (rem < nf) ? (uint32_t)rem : nf;
-        std::memcpy(samples, self.ttsWav_.data() + off, toCopy * sizeof(float));
-        if (toCopy < nf) std::memset(samples + toCopy, 0, (nf - toCopy) * sizeof(float));
-        self.ttsOffset_.store(off + toCopy, std::memory_order_release);
-        if (off + toCopy >= self.ttsWav_.size())
-            self.drainPending_.store(true, std::memory_order_release);
+        // Feed whatever was sent to the speaker into the ABOX AEC reference ring.
+        // This includes both TTS audio and silence — ABOX needs the full signal
+        // so the AEC reference stays temporally aligned with the mic signal.
+        if (self.ttsref_)
+            hermes::TtsRef_Write(self.ttsref_, samples, nf);
     }
+
+    static hermes::TtsRefRing* openTtsRef() {
+        int fd = shm_open("/hermes.ttsref", O_CREAT | O_RDWR, 0600);
+        if (fd < 0) { perror("[CC] shm_open ttsref"); return nullptr; }
+        if (ftruncate(fd, sizeof(hermes::TtsRefRing)) < 0) {
+            perror("[CC] ftruncate ttsref"); close(fd); return nullptr;
+        }
+        void* p = mmap(nullptr, sizeof(hermes::TtsRefRing),
+                       PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        close(fd);
+        return (p == MAP_FAILED) ? nullptr : static_cast<hermes::TtsRefRing*>(p);
+    }
+
+    hermes::TtsRefRing*  ttsref_{nullptr};
 
     std::atomic<bool>    capturing_{false};
     std::atomic<bool>    abort_{false};
