@@ -56,6 +56,16 @@ static const char* evt_name(uint16_t id) {
         case _Supervisor::evt::SESSION_STARTED: return "SUP.SESSION_STARTED";
         case _Supervisor::evt::SESSION_ENDED:   return "SUP.SESSION_ENDED";
     }
+    switch (id) {
+        case _Llm::evt::STT_PARTIAL:    return "CC.STT_PARTIAL";
+        case _Llm::evt::STT_FINAL:      return "CC.STT_FINAL";
+        case _Llm::evt::STT_ENDPOINT:   return "CC.STT_ENDPOINT";
+        case _Llm::evt::STT_NO_SPEECH:  return "CC.STT_NO_SPEECH";
+        case _Llm::evt::LLM_BEGIN:      return "CC.LLM_BEGIN";
+        case _Llm::evt::TTS_CHUNK:      return "CC.TTS_CHUNK";
+        case _Llm::evt::TTS_STREAM_END: return "CC.TTS_STREAM_END";
+        case _Llm::evt::LLM_ERROR:      return "CC.LLM_ERROR";
+    }
     return nullptr;
 }
 
@@ -65,7 +75,25 @@ class GuiBridge : public MsgBus {
 public:
     int ProcessMsg(CMsg* m) override {
         const char* n = evt_name(m->hdr.id);
-        char line[96];
+        char line[256];
+        // Extract text body for transcript / reply events before the generic log line.
+        if (m->pBody && m->hdr.length > 0) {
+            std::string text(static_cast<const char*>(m->pBody), m->hdr.length);
+            if (m->hdr.id == _Llm::evt::STT_FINAL) {
+                setConv("listening", text, "");
+                std::snprintf(line, sizeof(line), "CC.STT_FINAL: '%s'", text.c_str());
+                pushEvent(line); return 0;
+            }
+            if (m->hdr.id == _Llm::evt::LLM_BEGIN) {
+                setReply("speaking", text);
+                std::snprintf(line, sizeof(line), "CC.LLM_BEGIN: '%s'", text.c_str());
+                pushEvent(line); return 0;
+            }
+        }
+        if (m->hdr.id == _Supervisor::evt::SESSION_STARTED) setStatus("listening");
+        if (m->hdr.id == _Supervisor::evt::SESSION_ENDED)   setStatus("idle");
+        if (m->hdr.id == _Llm::evt::TTS_STREAM_END)         setStatus("speaking");
+        if (m->hdr.id == _Llm::evt::STT_NO_SPEECH)          setStatus("idle");
         if (n) std::snprintf(line, sizeof(line), "%s (from mod%u)", n, m->hdr.src);
         else   std::snprintf(line, sizeof(line), "evt#%u (from mod%u)", m->hdr.id, m->hdr.src);
         pushEvent(line);
@@ -119,6 +147,25 @@ public:
         if (p > 0) { int st = 0; if (waitpid(p, &st, WNOHANG) == p) playPid_.store(-1); }
     }
 
+    void setConv(const std::string& status, const std::string& transcript, const std::string& reply) {
+        std::lock_guard<std::mutex> lk(conv_mu_);
+        conv_status_ = status; conv_transcript_ = transcript;
+        if (!reply.empty()) conv_reply_ = reply;
+    }
+    void setReply(const std::string& status, const std::string& reply) {
+        std::lock_guard<std::mutex> lk(conv_mu_);
+        conv_status_ = status; conv_reply_ = reply;
+    }
+    void setStatus(const std::string& status) {
+        std::lock_guard<std::mutex> lk(conv_mu_); conv_status_ = status;
+    }
+    std::string convJson() {
+        std::lock_guard<std::mutex> lk(conv_mu_);
+        return "{\"status\":\"" + jsonEscape(conv_status_) + "\","
+               "\"transcript\":\"" + jsonEscape(conv_transcript_) + "\","
+               "\"reply\":\"" + jsonEscape(conv_reply_) + "\"}";
+    }
+
     static std::string jsonEscape(const std::string& s) {
         std::string o;
         for (char c : s) {
@@ -133,6 +180,8 @@ private:
     std::mutex mu_;
     std::deque<std::string> events_;
     std::atomic<pid_t> playPid_{-1};
+    std::mutex conv_mu_;
+    std::string conv_status_{"idle"}, conv_transcript_, conv_reply_;
 };
 
 // ── Minimal JSON field extraction (control bodies are tiny and we generate the client). ──
@@ -341,6 +390,38 @@ static int serve(GuiBridge& bus, const std::string& samplesDir, int port) {
             send_resp(c, "200 OK", "application/json", bus.eventsJson());
         } else if (method == "POST" && path == "/api/cmd") {
             send_resp(c, "200 OK", "application/json", dispatch(bus, samplesDir, body));
+        } else if (method == "GET" && path == "/api/conversation") {
+            send_resp(c, "200 OK", "application/json", bus.convJson());
+        } else if (method == "POST" && path == "/api/speak") {
+            // Receive WAV from browser mic → play through DSP chain → trigger session
+            if (body.size() < 44) {
+                send_resp(c, "400 Bad Request", "application/json",
+                          "{\"ok\":false,\"err\":\"too short to be a WAV\"}");
+            } else {
+                const char* wav = "/tmp/hermes_gui_speak.wav";
+                FILE* wf = fopen(wav, "wb");
+                if (!wf) {
+                    send_resp(c, "500 Internal Server Error", "application/json",
+                              "{\"ok\":false,\"err\":\"cannot write temp wav\"}");
+                    close(c); continue;
+                }
+                size_t wr = fwrite(body.data(), 1, body.size(), wf);
+                fclose(wf);
+                if (wr != body.size()) {
+                    unlink(wav);
+                    send_resp(c, "500 Internal Server Error", "application/json",
+                              "{\"ok\":false,\"err\":\"short write\"}");
+                    close(c); continue;
+                }
+                bus.setStatus("listening");
+                bus.pushEvent(std::string("⇢ SPEAK: ") + std::to_string(body.size()) + " B WAV → abox");
+                // Send START_SESSION to Supervisor (skip wake word, go straight to CONVERSATION)
+                bus.SendMsg(ModuleId::SUPERVISOR, _Supervisor::cmd::START_SESSION, PRIO_NORMAL,
+                            nullptr, 0);
+                // Feed the audio into the DSP chain via pw-play → hermes.abox
+                bus.startPlay(wav);
+                send_resp(c, "200 OK", "application/json", "{\"ok\":true}");
+            }
         } else if (method == "POST" && path == "/api/stt") {
             if (body.size() < 44 || body.size() > 10 * 1024 * 1024) {
                 send_resp(c, "400 Bad Request", "application/json",

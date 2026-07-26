@@ -87,13 +87,36 @@ R"HTML(<!doctype html>
   </section>
 
   <section class="card full">
-    <h2>Voice STT — real sherpa-onnx</h2>
+    <h2>Voice STT — standalone direct path (no pipeline)</h2>
     <div class="row" style="align-items:center">
       <button id="recBtn" class="primary" onclick="toggleRecord()">● Record</button>
       <span id="recStatus" style="color:var(--mut);font-size:12px;padding:0 12px">idle — click Record, speak, click again to transcribe</span>
     </div>
     <div id="transcript" style="margin-top:10px;padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:7px;min-height:36px;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;color:#c9d1d9"></div>
     <p class="hint">Browser mic → WAV → target sherpa-onnx (streaming zipformer 20M int8). QEMU: ~4s model load + 4.5× RT inference per clip. Mic needs a secure context: open via localhost / SSH port-forward (plain http://<ip> blocks getUserMedia).</p>
+  </section>
+
+  <section class="card full">
+    <h2>Speak to Aria — full pipeline test</h2>
+    <div class="row" style="align-items:center;gap:16px">
+      <button id="speakBtn" class="primary" style="min-width:160px" onclick="toggleSpeak()">🎤 Hold to Speak</button>
+      <span id="speakStatus" style="color:var(--mut);font-size:12px">idle — click to record, click again to send through the DSP chain → STT → LLM → TTS</span>
+    </div>
+    <p class="hint">Browser mic → WAV → <code>pw-play --target hermes.abox</code> (beamform→AEC→capgate) → llm_connector (resident STT → Groq → Piper TTS). Uses <code>START_SESSION</code> to bypass wake word for testing.</p>
+  </section>
+
+  <section class="card full">
+    <h2>Conversation <span class="pill" id="convStatus">idle</span></h2>
+    <div style="display:grid;gap:10px">
+      <div style="background:#0d1117;border:1px solid #30363d;border-radius:7px;padding:12px">
+        <div style="font-size:11px;color:var(--mut);margin-bottom:6px;text-transform:uppercase;letter-spacing:.06em">You</div>
+        <div id="convTranscript" style="font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;color:#c9d1d9;min-height:22px">—</div>
+      </div>
+      <div style="background:#0d1117;border:1px solid #1f6feb;border-radius:7px;padding:12px">
+        <div style="font-size:11px;color:#4ea1ff;margin-bottom:6px;text-transform:uppercase;letter-spacing:.06em">Aria</div>
+        <div id="convReply" style="font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;color:#c9d1d9;min-height:22px">—</div>
+      </div>
+    </div>
   </section>
 
   <section class="card full" id="log">
@@ -154,7 +177,62 @@ volLabel();
 setInterval(pollEvents, 700);
 pollEvents();
 
-// ── Voice STT ────────────────────────────────────────────────────────────────
+// ── Speak-to-Aria (full pipeline) ─────────────────────────────────────────────
+let _spkActive=false, _spkCtx, _spkProc, _spkStream, _spkChunks=[];
+
+async function toggleSpeak() {
+  if (!_spkActive) {
+    try {
+      _spkStream = await navigator.mediaDevices.getUserMedia({audio:{channelCount:1,sampleRate:48000},video:false});
+      _spkCtx = new (window.AudioContext||window.webkitAudioContext)({sampleRate:48000});
+      const src = _spkCtx.createMediaStreamSource(_spkStream);
+      _spkProc = _spkCtx.createScriptProcessor(4096, 1, 1);
+      _spkChunks = [];
+      _spkProc.onaudioprocess = e => _spkChunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+      src.connect(_spkProc); _spkProc.connect(_spkCtx.destination);
+      _spkActive = true;
+      $('#speakBtn').textContent = '■ Stop & Send';
+      $('#speakBtn').className = 'danger';
+      $('#speakStatus').textContent = 'recording… speak now, then click Stop & Send';
+      $('#speakStatus').style.color = '#3fb950';
+    } catch(e) { flash('mic error: '+e, true); }
+  } else {
+    _spkProc.disconnect(); _spkStream.getTracks().forEach(t=>t.stop());
+    _spkActive = false;
+    const sr = _spkCtx.sampleRate;
+    await _spkCtx.close();
+    const wav = _buildWav(_spkChunks, sr);
+    const secs = ((wav.byteLength-44)/(sr*2)).toFixed(1);
+    $('#speakBtn').textContent = '🎤 Hold to Speak'; $('#speakBtn').className = 'primary';
+    $('#speakStatus').textContent = `sending ${secs}s → DSP pipeline…`;
+    $('#speakStatus').style.color = 'var(--acc)';
+    try {
+      const r = await fetch('/api/speak', {method:'POST', body:wav, headers:{'Content-Type':'audio/wav'}});
+      const j = await r.json();
+      $('#speakStatus').textContent = j.ok ? 'audio sent → listening for STT…' : 'error: '+(j.err||'unknown');
+      $('#speakStatus').style.color = j.ok ? 'var(--mut)' : '#f85149';
+    } catch(e) {
+      $('#speakStatus').textContent = 'error: '+e; $('#speakStatus').style.color = '#f85149';
+    }
+  }
+}
+
+// ── Conversation panel polling ─────────────────────────────────────────────────
+const kStatusColor = {idle:'var(--mut)', listening:'#3fb950', speaking:'var(--acc)'};
+async function pollConversation() {
+  try {
+    const c = await api('/api/conversation');
+    $('#convStatus').textContent = c.status||'idle';
+    $('#convStatus').style.background = kStatusColor[c.status]||'#21262d';
+    $('#convStatus').style.color = '#04101f';
+    if (c.transcript) $('#convTranscript').textContent = c.transcript;
+    if (c.reply)      $('#convReply').textContent      = c.reply;
+  } catch(e) {}
+}
+setInterval(pollConversation, 800);
+pollConversation();
+
+// ── Voice STT (standalone direct path) ────────────────────────────────────────
 let _recActive=false, _recCtx, _recProc, _recStream, _recChunks=[];
 
 async function toggleRecord() {

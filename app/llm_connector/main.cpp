@@ -545,8 +545,10 @@ private:
             SendMsg(ModuleId::SUPERVISOR, _Llm::evt::STT_NO_SPEECH, PRIO_NORMAL);
             abort_ = false; return;
         }
-        SendMsg(ModuleId::STORY_AGENT, _Llm::evt::STT_FINAL, PRIO_NORMAL,
+        SendMsg(ModuleId::STORY_AGENT,    _Llm::evt::STT_FINAL, PRIO_NORMAL,
                 transcript.c_str(), (uint32_t)transcript.size());   // §16.2: story_agent consumes
+        SendMsg(ModuleId::GUI_INTERFACE, _Llm::evt::STT_FINAL, PRIO_NORMAL,
+                transcript.c_str(), (uint32_t)transcript.size());   // GUI conversation panel
         if (abort_ || turnGen_.load() != myGen) { abort_ = false; return; }
 
         // history_ is copied under the lock for the request, and updated under the lock
@@ -556,6 +558,9 @@ private:
         { std::lock_guard<std::mutex> lk(pcmMtx_); hist = history_; }
         std::string reply = groq_chat(apiKey_, transcript, hist);
         fprintf(stderr, "[CC] reply: %s\n", reply.c_str());
+        if (!reply.empty())
+            SendMsg(ModuleId::GUI_INTERFACE, _Llm::evt::LLM_BEGIN, PRIO_NORMAL,
+                    reply.c_str(), (uint32_t)reply.size());          // GUI conversation panel
         if (reply.empty() || abort_) {
             SendMsg(ModuleId::SUPERVISOR, _Llm::evt::LLM_ERROR, PRIO_NORMAL);
             abort_ = false; return;
