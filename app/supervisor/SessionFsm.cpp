@@ -33,6 +33,7 @@ const char* SessionStateName(SessionState s) {
 
 Supervisor::Supervisor() : MsgBus() {
     Add(_CodecHw::evt::READY,                &Supervisor::onReady);
+    Add(_Supervisor::cmd::START_SESSION,     &Supervisor::onStartSession);
     Add(_VoiceTrigger::evt::WAKE_CONFIRMED,  &Supervisor::onWake);
     Add(_AudioCore::evt::BARGE_IN,           &Supervisor::onBargeIn);
     Add(_Llm::evt::STT_ENDPOINT,             &Supervisor::onSttEndpoint);
@@ -114,6 +115,12 @@ void Supervisor::onReady(const CMsg* /*m*/) {
     if (state_ != SS_INIT) return;
     fprintf(stderr, "[SUP] graph up — entering IDLE\n");
     enter(SS_IDLE);
+}
+
+void Supervisor::onStartSession(const CMsg* m) {
+    fprintf(stderr, "[SUP] START_SESSION (GUI/PTT) received (state=%s)\n", SessionStateName(state_));
+    if (state_ != SS_IDLE) return;
+    startTurn(m ? m->pBody : nullptr, m ? m->hdr.length : 0);  // body carries WAV path for file-inject
 }
 
 // KEY PATH: keyword wake (§16.5)

@@ -414,12 +414,11 @@ static int serve(GuiBridge& bus, const std::string& samplesDir, int port) {
                     close(c); continue;
                 }
                 bus.setStatus("listening");
-                bus.pushEvent(std::string("⇢ SPEAK: ") + std::to_string(body.size()) + " B WAV → abox");
-                // Send START_SESSION to Supervisor (skip wake word, go straight to CONVERSATION)
+                bus.pushEvent(std::string("⇢ SPEAK: ") + std::to_string(body.size()) + " B WAV");
+                // Send START_SESSION to Supervisor; body = WAV path so llm_connector
+                // can run STT directly on the file (bypasses PipeWire for GUI-sourced turns).
                 bus.SendMsg(ModuleId::SUPERVISOR, _Supervisor::cmd::START_SESSION, PRIO_NORMAL,
-                            nullptr, 0);
-                // Feed the audio into the DSP chain via pw-play → hermes.abox
-                bus.startPlay(wav);
+                            wav, static_cast<uint32_t>(strlen(wav) + 1));
                 send_resp(c, "200 OK", "application/json", "{\"ok\":true}");
             }
         } else if (method == "POST" && path == "/api/stt") {

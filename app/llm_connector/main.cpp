@@ -293,16 +293,48 @@ private:
           pcmBuf_.clear(); sttResult_.clear(); sttDone_ = false;
           backfill_.clear(); }
         backfillPending_ = false;
-        // PREROLL BACKFILL (§16.3): a wake-entry OPEN_STREAM carries WakeConfirmedBody —
-        // splice the VTS ring history (what the child said OVER the keyword) in front of
-        // the live stream so the utterance is gapless from its true start.
-        if (m && m->pBody && m->hdr.length >= sizeof(WakeConfirmedBody) && sttResident())
-            scheduleBackfill(*static_cast<const WakeConfirmedBody*>(m->pBody));
         finalizeGen_ = 0;
         turnSamples_ = 0;
         vadSpeechMs_ = 0; vadSilenceMs_ = 0;
         vadHadSpeech_ = false; vadEndSent_ = false;
         abort_ = false;
+        // FILE-INJECT PATH (GUI/PTT): body is a null-terminated WAV file path.
+        // Bypass PipeWire capture — read the WAV directly and run STT in a thread.
+        if (m && m->pBody && m->hdr.length > 1 &&
+            m->hdr.length < static_cast<uint32_t>(sizeof(WakeConfirmedBody)) &&
+            static_cast<const char*>(m->pBody)[0] == '/') {
+            capturing_ = false;
+            std::string wavPath(static_cast<const char*>(m->pBody), m->hdr.length - 1);
+            uint32_t gen = turnGen_.load();
+            std::thread([this, wavPath, gen] {
+                fprintf(stderr, "[CC] file-inject STT: %s\n", wavPath.c_str());
+                WavPcm w = load_wav(wavPath.c_str());
+                std::vector<int16_t> pcm16;
+                pcm16.reserve(w.f32.size());
+                for (float s : w.f32) {
+                    int32_t v = static_cast<int32_t>(s * 32767.0f);
+                    if (v >  32767) v =  32767;
+                    if (v < -32768) v = -32768;
+                    pcm16.push_back(static_cast<int16_t>(v));
+                }
+                std::string text = run_stt(pcm16, w.rate ? w.rate : 16000);
+                {
+                    std::lock_guard<std::mutex> lk(pcmMtx_);
+                    if (turnGen_.load() != gen) return;
+                    sttResult_ = text;
+                    sttDone_   = true;
+                }
+                sttCv_.notify_all();
+                if (turnGen_.load() != gen) return;
+                SendMsg(ModuleId::SUPERVISOR, _Llm::evt::STT_ENDPOINT, PRIO_NORMAL);
+            }).detach();
+            return;
+        }
+        // PREROLL BACKFILL (§16.3): a wake-entry OPEN_STREAM carries WakeConfirmedBody —
+        // splice the VTS ring history (what the child said OVER the keyword) in front of
+        // the live stream so the utterance is gapless from its true start.
+        if (m && m->pBody && m->hdr.length >= sizeof(WakeConfirmedBody) && sttResident())
+            scheduleBackfill(*static_cast<const WakeConfirmedBody*>(m->pBody));
         capturing_ = true;
     }
     void onClose(const CMsg*)  { capturing_ = false; }

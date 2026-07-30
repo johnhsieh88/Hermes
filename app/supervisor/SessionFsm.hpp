@@ -44,6 +44,7 @@ private:
 
     // transition actions (emit commands via Send)
     void onReady(const CMsg*);           // SS_INIT        → SS_IDLE        (graph up)
+    void onStartSession(const CMsg*);   // SS_IDLE        → SS_CAPTURE     (GUI/PTT push-to-talk)
     void onWake(const CMsg*);            // SS_IDLE        → SS_CAPTURE     (KEY PATH: KWD)
     void onBargeIn(const CMsg*);         // SS_SPEAK       → SS_BARGE_DUCK  (KEY PATH: barge-in)
     void onSttEndpoint(const CMsg*);     // SS_CAPTURE     → SS_THINK
