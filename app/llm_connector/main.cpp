@@ -227,9 +227,13 @@ static std::string groq_chat(
 
 // ── TTS (Piper subprocess) ────────────────────────────────────────────────────
 static WavPcm run_tts(const std::string& text) {
-    // Test bypass: skip Piper and return 0.5s of silence at 22050 Hz.
-    if (getenv("HERMES_TEST_UTTERANCE") && *getenv("HERMES_TEST_UTTERANCE")) {
-        fprintf(stderr, "[CC] TTS stub: generating 0.5s silence for '%s'\n", text.c_str());
+    // Skip Piper and return 0.5s of silence — set either bypass var to enable.
+    // HERMES_SKIP_TTS=1  — skip TTS only (STT still runs real sherpa-onnx).
+    // HERMES_TEST_UTTERANCE=<text>  — stub both STT and TTS.
+    bool skipTts = (getenv("HERMES_SKIP_TTS") && *getenv("HERMES_SKIP_TTS"))
+                || (getenv("HERMES_TEST_UTTERANCE") && *getenv("HERMES_TEST_UTTERANCE"));
+    if (skipTts) {
+        fprintf(stderr, "[CC] TTS skip: returning silence for '%s'\n", text.c_str());
         WavPcm out; out.rate = 22050;
         out.f32.assign(22050 / 2, 0.0f);  // 0.5s silence
         return out;
@@ -300,8 +304,9 @@ private:
         abort_ = false;
         // FILE-INJECT PATH (GUI/PTT): body is a null-terminated WAV file path.
         // Bypass PipeWire capture — read the WAV directly and run STT in a thread.
+        // Distinguish from WakeConfirmedBody (binary struct) by the leading '/' byte —
+        // a PipeWire sample position never has 0x2F as its first little-endian byte.
         if (m && m->pBody && m->hdr.length > 1 &&
-            m->hdr.length < static_cast<uint32_t>(sizeof(WakeConfirmedBody)) &&
             static_cast<const char*>(m->pBody)[0] == '/') {
             capturing_ = false;
             std::string wavPath(static_cast<const char*>(m->pBody), m->hdr.length - 1);
@@ -607,7 +612,11 @@ private:
         }
 
         WavPcm wav = run_tts(reply);
-        if (wav.f32.empty() || abort_) { abort_ = false; return; }
+        if (wav.f32.empty() || abort_) {
+            // TTS failed or was aborted — tell Supervisor so it can return to IDLE.
+            if (!abort_) SendMsg(ModuleId::SUPERVISOR, _Llm::evt::LLM_ERROR, PRIO_NORMAL);
+            abort_ = false; return;
+        }
 
         {   // install playback only if this is still the live turn (onOpen holds the same
             // lock while bumping turnGen_, so a stale install can't slip past the check)
