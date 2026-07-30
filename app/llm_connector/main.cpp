@@ -238,14 +238,33 @@ static WavPcm run_tts(const std::string& text) {
         out.f32.assign(22050 / 2, 0.0f);  // 0.5s silence
         return out;
     }
-    static const char* kWav   = "/tmp/cc-tts.wav";
-    static const char* kModel = "/opt/ensoul/models/tts/en_US-hfc_female-medium.onnx";
-    FILE* p = popen(
-        (std::string("piper --model ") + kModel +
-         " --output_file " + kWav +
-         " --sentence_silence 0.1 2>/dev/null").c_str(), "w");
+    static const char* kWav     = "/tmp/cc-tts.wav";
+    static const char* kModel   = "/opt/ensoul/models/tts/kokoro-en-v0_19/model.onnx";
+    static const char* kVoices  = "/opt/ensoul/models/tts/kokoro-en-v0_19/voices.bin";
+    static const char* kTokens  = "/opt/ensoul/models/tts/kokoro-en-v0_19/tokens.txt";
+    static const char* kDataDir = "/opt/ensoul/models/tts/kokoro-en-v0_19/espeak-ng-data";
+    // Shell-escape the text with single-quote wrapping (' → '\'' inside).
+    std::string esc;
+    esc.reserve(text.size() + 2);
+    esc += '\'';
+    for (char c : text) {
+        if (c == '\'') esc += "'\\''";
+        else           esc += c;
+    }
+    esc += '\'';
+    char cmd[4096];
+    snprintf(cmd, sizeof cmd,
+        "sherpa-onnx-offline-tts"
+        " --kokoro-model=%s"
+        " --kokoro-voices=%s"
+        " --kokoro-tokens=%s"
+        " --kokoro-data-dir=%s"
+        " --sid=0"
+        " --output-filename=%s"
+        " %s 2>/dev/null",
+        kModel, kVoices, kTokens, kDataDir, kWav, esc.c_str());
+    FILE* p = popen(cmd, "r");
     if (!p) return {};
-    fwrite(text.c_str(), 1, text.size(), p);
     pclose(p);
     WavPcm wav = load_wav(kWav);
     unlink(kWav);
