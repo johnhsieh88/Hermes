@@ -312,7 +312,8 @@ private:
             std::string wavPath(static_cast<const char*>(m->pBody), m->hdr.length - 1);
             uint32_t gen = turnGen_.load();
             std::thread([this, wavPath, gen] {
-                fprintf(stderr, "[CC] file-inject STT: %s\n", wavPath.c_str());
+                auto t0 = std::chrono::steady_clock::now();
+                fprintf(stderr, "[CC][t=0.00s] STT start: %s\n", wavPath.c_str());
                 WavPcm w = load_wav(wavPath.c_str());
                 std::vector<int16_t> pcm16;
                 pcm16.reserve(w.f32.size());
@@ -323,6 +324,9 @@ private:
                     pcm16.push_back(static_cast<int16_t>(v));
                 }
                 std::string text = run_stt(pcm16, w.rate ? w.rate : 16000);
+                double sttSecs = std::chrono::duration<double>(
+                    std::chrono::steady_clock::now() - t0).count();
+                fprintf(stderr, "[CC][t=%.2fs] STT done: '%s'\n", sttSecs, text.c_str());
                 {
                     std::lock_guard<std::mutex> lk(pcmMtx_);
                     if (turnGen_.load() != gen) return;
@@ -556,6 +560,10 @@ private:
         // gate checks it, and no shared state (sttResult_/history_/ttsWav_) is touched once
         // a newer onOpen() has bumped turnGen_.
         const uint32_t myGen = turnGen_.load();
+        auto tStart = std::chrono::steady_clock::now();
+        auto elapsed = [&]{ return std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - tStart).count(); };
+
         // Transcript source, in priority order: test stub → resident STT (sttLoop finalize
         // handshake) → run_stt() subprocess fallback on the pcm sttLoop accumulated.
         std::string transcript;
@@ -574,10 +582,11 @@ private:
             transcript = std::move(sttResult_); sttResult_.clear(); sttDone_ = false;
             pcm = std::move(pcmBuf_); pcmBuf_.clear();
         }
+        double tAfterStt = elapsed();
         if (abort_) { abort_ = false; return; }
         if (transcript.empty() && !pcm.empty())
             transcript = run_stt(pcm, kCaptureRate);         // no-sherpa fallback path
-        fprintf(stderr, "[CC] transcript: '%s'\n", transcript.c_str());
+        fprintf(stderr, "[CC][t=%.2fs] transcript: '%s'\n", elapsed(), transcript.c_str());
         if (transcript.empty() || abort_) {
             SendMsg(ModuleId::SUPERVISOR, _Llm::evt::STT_NO_SPEECH, PRIO_NORMAL);
             abort_ = false; return;
@@ -594,7 +603,8 @@ private:
         std::vector<std::pair<std::string, std::string>> hist;
         { std::lock_guard<std::mutex> lk(pcmMtx_); hist = history_; }
         std::string reply = groq_chat(apiKey_, transcript, hist);
-        fprintf(stderr, "[CC] reply: %s\n", reply.c_str());
+        double tAfterLlm = elapsed();
+        fprintf(stderr, "[CC][t=%.2fs] LLM reply: %s\n", tAfterLlm, reply.c_str());
         if (!reply.empty())
             SendMsg(ModuleId::GUI_INTERFACE, _Llm::evt::LLM_BEGIN, PRIO_NORMAL,
                     reply.c_str(), (uint32_t)reply.size());          // GUI conversation panel
@@ -612,6 +622,9 @@ private:
         }
 
         WavPcm wav = run_tts(reply);
+        double tAfterTts = elapsed();
+        fprintf(stderr, "[CC] timing — STT: %.2fs  LLM: %.2fs  TTS: %.2fs  total: %.2fs\n",
+                tAfterStt, tAfterLlm - tAfterStt, tAfterTts - tAfterLlm, tAfterTts);
         if (wav.f32.empty() || abort_) {
             // TTS failed or was aborted — tell Supervisor so it can return to IDLE.
             if (!abort_) SendMsg(ModuleId::SUPERVISOR, _Llm::evt::LLM_ERROR, PRIO_NORMAL);
