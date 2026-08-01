@@ -225,9 +225,8 @@ static std::string groq_chat(
 }
 #endif
 
-// ── TTS (Piper subprocess) ────────────────────────────────────────────────────
+// ── TTS (Kokoro int8 via sherpa-onnx-offline-tts) ────────────────────────────
 static WavPcm run_tts(const std::string& text) {
-    // Skip Piper and return 0.5s of silence — set either bypass var to enable.
     // HERMES_SKIP_TTS=1  — skip TTS only (STT still runs real sherpa-onnx).
     // HERMES_TEST_UTTERANCE=<text>  — stub both STT and TTS.
     bool skipTts = (getenv("HERMES_SKIP_TTS") && *getenv("HERMES_SKIP_TTS"))
@@ -238,11 +237,8 @@ static WavPcm run_tts(const std::string& text) {
         out.f32.assign(22050 / 2, 0.0f);  // 0.5s silence
         return out;
     }
+    static const char* kDir     = "/opt/ensoul/models/tts/kokoro-int8-multi-lang-v1_1";
     static const char* kWav     = "/tmp/cc-tts.wav";
-    static const char* kModel   = "/opt/ensoul/models/tts/kokoro-en-v0_19/model.onnx";
-    static const char* kVoices  = "/opt/ensoul/models/tts/kokoro-en-v0_19/voices.bin";
-    static const char* kTokens  = "/opt/ensoul/models/tts/kokoro-en-v0_19/tokens.txt";
-    static const char* kDataDir = "/opt/ensoul/models/tts/kokoro-en-v0_19/espeak-ng-data";
     // Shell-escape the text with single-quote wrapping (' → '\'' inside).
     std::string esc;
     esc.reserve(text.size() + 2);
@@ -255,14 +251,15 @@ static WavPcm run_tts(const std::string& text) {
     char cmd[4096];
     snprintf(cmd, sizeof cmd,
         "sherpa-onnx-offline-tts"
-        " --kokoro-model=%s"
-        " --kokoro-voices=%s"
-        " --kokoro-tokens=%s"
-        " --kokoro-data-dir=%s"
+        " --kokoro-model=%s/model.int8.onnx"
+        " --kokoro-voices=%s/voices.bin"
+        " --kokoro-tokens=%s/tokens.txt"
+        " --kokoro-data-dir=%s/espeak-ng-data"
+        " --kokoro-lexicon=%s/lexicon-us-en.txt"
         " --sid=0"
         " --output-filename=%s"
         " %s 2>/dev/null",
-        kModel, kVoices, kTokens, kDataDir, kWav, esc.c_str());
+        kDir, kDir, kDir, kDir, kDir, kWav, esc.c_str());
     FILE* p = popen(cmd, "r");
     if (!p) return {};
     pclose(p);
