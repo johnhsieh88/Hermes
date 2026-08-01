@@ -238,6 +238,7 @@ static WavPcm run_tts(const std::string& text) {
         return out;
     }
     static const char* kDir     = "/opt/ensoul/models/tts/kokoro-int8-multi-lang-v1_1";
+    static const char* kDataDir = "/opt/ensoul/models/tts/kokoro-en-v0_19/espeak-ng-data";
     static const char* kWav     = "/tmp/cc-tts.wav";
     // Shell-escape the text with single-quote wrapping (' → '\'' inside).
     std::string esc;
@@ -254,12 +255,12 @@ static WavPcm run_tts(const std::string& text) {
         " --kokoro-model=%s/model.int8.onnx"
         " --kokoro-voices=%s/voices.bin"
         " --kokoro-tokens=%s/tokens.txt"
-        " --kokoro-data-dir=%s/espeak-ng-data"
+        " --kokoro-data-dir=%s"
         " --kokoro-lexicon=%s/lexicon-us-en.txt"
         " --sid=0"
         " --output-filename=%s"
         " %s 2>/dev/null",
-        kDir, kDir, kDir, kDir, kDir, kWav, esc.c_str());
+        kDir, kDir, kDir, kDataDir, kDir, kWav, esc.c_str());
     FILE* p = popen(cmd, "r");
     if (!p) return {};
     pclose(p);
