@@ -123,8 +123,8 @@ static std::string run_stt(const std::vector<int16_t>& pcm, uint32_t rate) {
     static const char* kWav = "/tmp/cc-utterance.wav";
     write_wav(kWav, pcm, rate);
     char cmd[2048];
-    // Redirect stderr to /dev/null: the sherpa-onnx config dump is kilobytes of
-    // verbose text on stderr; stdout carries only the JSON result line(s).
+    // sherpa-onnx writes the JSON result to stderr and progress/config to stdout.
+    // Redirect: stderr→pipe (2>&1), then stdout→/dev/null (1>/dev/null).
     snprintf(cmd, sizeof cmd,
         "sherpa-onnx"
         " --encoder=%s/encoder-epoch-99-avg-1.int8.onnx"
@@ -132,7 +132,7 @@ static std::string run_stt(const std::vector<int16_t>& pcm, uint32_t rate) {
         " --joiner=%s/joiner-epoch-99-avg-1.int8.onnx"
         " --tokens=%s/tokens.txt"
         " --num-threads=2"
-        " %s 2>/dev/null",
+        " %s 2>&1 1>/dev/null",
         kSttBase, kSttBase, kSttBase, kSttBase, kWav);
     FILE* p = popen(cmd, "r");
     if (!p) { unlink(kWav); return {}; }
