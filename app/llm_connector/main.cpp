@@ -123,6 +123,8 @@ static std::string run_stt(const std::vector<int16_t>& pcm, uint32_t rate) {
     static const char* kWav = "/tmp/cc-utterance.wav";
     write_wav(kWav, pcm, rate);
     char cmd[2048];
+    // Redirect stderr to /dev/null: the sherpa-onnx config dump is kilobytes of
+    // verbose text on stderr; stdout carries only the JSON result line(s).
     snprintf(cmd, sizeof cmd,
         "sherpa-onnx"
         " --encoder=%s/encoder-epoch-99-avg-1.int8.onnx"
@@ -130,16 +132,19 @@ static std::string run_stt(const std::vector<int16_t>& pcm, uint32_t rate) {
         " --joiner=%s/joiner-epoch-99-avg-1.int8.onnx"
         " --tokens=%s/tokens.txt"
         " --num-threads=2"
-        " %s 2>&1",
+        " %s 2>/dev/null",
         kSttBase, kSttBase, kSttBase, kSttBase, kWav);
     FILE* p = popen(cmd, "r");
     if (!p) { unlink(kWav); return {}; }
-    char buf[4096] = {};
-    fread(buf, 1, sizeof buf - 1, p);
+    std::string out;
+    char tmp[4096];
+    size_t n;
+    while ((n = fread(tmp, 1, sizeof tmp, p)) > 0)
+        out.append(tmp, n);
     pclose(p);
     unlink(kWav);
     const char* needle = "\"text\": \"";
-    char* start = strstr(buf, needle);
+    const char* start = strstr(out.c_str(), needle);
     if (!start) return {};
     start += strlen(needle);
     std::string text;
