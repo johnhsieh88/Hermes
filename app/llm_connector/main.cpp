@@ -232,10 +232,9 @@ static std::string groq_chat(
 
 // ── TTS (Kokoro int8 via sherpa-onnx-offline-tts) ────────────────────────────
 static WavPcm run_tts(const std::string& text) {
-    // HERMES_SKIP_TTS=1  — skip TTS only (STT still runs real sherpa-onnx).
-    // HERMES_TEST_UTTERANCE=<text>  — stub both STT and TTS.
-    bool skipTts = (getenv("HERMES_SKIP_TTS") && *getenv("HERMES_SKIP_TTS"))
-                || (getenv("HERMES_TEST_UTTERANCE") && *getenv("HERMES_TEST_UTTERANCE"));
+    // HERMES_SKIP_TTS=1  — skip TTS, return silence (STT unaffected).
+    // HERMES_TEST_UTTERANCE=<text>  — stubs STT only; TTS still runs.
+    bool skipTts = (getenv("HERMES_SKIP_TTS") && *getenv("HERMES_SKIP_TTS"));
     if (skipTts) {
         fprintf(stderr, "[CC] TTS skip: returning silence for '%s'\n", text.c_str());
         WavPcm out; out.rate = 22050;
